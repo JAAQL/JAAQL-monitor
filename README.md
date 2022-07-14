@@ -8,7 +8,7 @@ Where creds_file is a file of the format
     jaaql_url
     username
     password
-    
+
 And as an example
 
     jaaql.io

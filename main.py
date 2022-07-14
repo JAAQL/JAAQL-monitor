@@ -4,6 +4,8 @@ import json
 from sys import exit
 from getpass import getpass
 
+import urllib
+
 ENDPOINT__oauth = "/oauth/token"
 ENDPOINT__submit_file = "/submit-file"
 ENDPOINT__submit = "/submit"
@@ -67,15 +69,22 @@ def format_url(url_input: str):
 
 
 def load_from_config_file(file_name):
-    config = open(file_name, "r").read()
-    config = split_by_lines(config)
-    jaaql_url = format_url(config[0])
-    username = config[1].strip()
-    password = config[2].strip()
+    try:
+        config = open(file_name, "r").read()
+        config = split_by_lines(config)
+        jaaql_url = format_url(config[0])
+        username = config[1].strip()
+        password = config[2].strip()
+        database = None
+        if len(config) > 3:
+            database = config[3].strip()
+            print("Found database " + database)
 
-    print("Successfully loaded config")
+        print("Successfully loaded config")
 
-    return jaaql_url, username, password
+        return jaaql_url, username, password, database
+    except FileNotFoundError:
+        print_error("Could not find file " + file_name, True)
 
 
 def format_output_row(data, max_length, data_types, breaches):
@@ -109,6 +118,8 @@ def format_output_divider(max_length):
 
 
 def format_query_output(json_output):
+    if "rows" not in json_output:
+        return None
     str_num_rows = "(" + str(len(json_output["rows"])) + " " + ("row" if len(json_output["rows"]) == 1 else "rows") + ")"
 
     max_length = []
@@ -170,43 +181,73 @@ def handle_login(jaaql_url: str = None):
         username = input("Username: ").strip()
         password = getpass(prompt='Password: ', stream=None)
 
-    return format_url(jaaql_url), username, password
+    return format_url(jaaql_url), username, password, None
 
 
 was_go = False
 fetched_query = ""
 oauth_token = None
 fetched_stdin = None
+is_script = False
+cur_mode = MODE__sql
+fetched_database = None
 
 
 def on_go():
+    global is_script
     global fetched_query
     global oauth_token
     global was_go
     global fetched_stdin
+    global fetched_database
 
     was_go = False
     res = None
 
     if cur_mode == MODE__sql:
-        the_endpoint = ENDPOINT__submit_file if is_script else ENDPOINT__submit
-        res = requests.post(jaaql_url + the_endpoint, json={"query": fetched_query}, headers=oauth_token)
+        the_endpoint = ENDPOINT__submit_file if is_script and "create database" not in fetched_query.lower() and "drop database" not in fetched_query.lower() else ENDPOINT__submit
+        send_json = {"query": fetched_query}
+        if fetched_database is not None:
+            send_json["database"] = fetched_database
+        res = requests.post(jaaql_url + the_endpoint, json=send_json, headers=oauth_token)
     else:
+        if '\g' in fetched_stdin:
+            fetched_stdin = fetched_query
         commands = split_by_lines(fetched_stdin, 2)
+        last_res = {}
         for command, x in zip(commands, range(len(commands))):
+            if command.strip() == '\g' or len(command.strip()) == 0:
+                continue
             command_split = split_by_lines(command)
             command_data = None
-            if len(command_split) == 1:
-                command_data = None
-            else:
-                command_data = command_split[1:]
-            res = requests.request(command_split[0].split(" ")[0], jaaql_url + command_split[1].split(" ")[1], json=command_data,
-                                   headers=oauth_token)
+            if len(command_split) != 1:
+                command_data = "\r\n".join(command_split[1:])
+
+            if isinstance(last_res, dict) and command_data is not None:
+                for key, val in last_res.items():
+                    if "{{" + key + "}}" in command_data:
+                        command_data = command_data.replace("{{" + key + "}}", val)
+            url_part_one = command_split[0].split(" ")[1].split("?")[0]
+            url_part_two = ""
+            if len(command_split[0].split(" ")[1].split("?")) > 1:
+                url_part_one = url_part_one + "?"
+                url_part_two = "?".join(command_split[0].split(" ")[1].split("?")[1:])
+                url_part_two = "&".join([urllib.parse.quote(part.split("=")[0]) + "=" + urllib.parse.quote(part.split("=")[1]) for part in url_part_two.split("&")])
+
+            pass_json = None
+            if command_data is not None and len(command_data.strip()) != 0:
+                pass_json = json.loads(command_data)
+            print(command_split[0].split(" ")[0] + " " + jaaql_url + url_part_one + url_part_two)
+            res = requests.request(command_split[0].split(" ")[0], jaaql_url + url_part_one + url_part_two, json=pass_json, headers=oauth_token)
+            if pass_json is not None:
+                print(json.dumps(pass_json))
+            print(res.status_code)
             if res.status_code == 200:
                 if x != len(commands) - 1:
                     print(json.dumps(res.json()))
+                last_res = res.json()
             else:
-                fetched_query = commands[x:].join("\n\n")
+                fetched_query = "\r\n".join(commands[x:])
                 break
 
     if res.status_code == 401:
@@ -214,7 +255,8 @@ def on_go():
         oauth_token = None
         print("Refreshing oauth token")
     elif res.status_code == 200:
-        format_query_output(res.json())
+        if cur_mode == MODE__sql:
+            format_query_output(res.json())
         fetched_query = ""
     else:
         print_error(res.text, is_script)
@@ -223,18 +265,22 @@ def on_go():
 
 if __name__ == "__main__":
     args = sys.argv[1:]
-    is_script = len([arg for arg in args if arg in ['-s', '--script']]) != 0
+    is_script = len([arg for arg in args if arg in ['-s', '--sql']]) != 0 or len([arg for arg in args if arg in ['-j', '--jaaql']]) != 0
+    is_jaaql = len([arg for arg in args if arg in ['-j', '--jaaql']]) != 0
 
-    if len(sys.argv) < 3 and is_script:
+    if is_jaaql:
+        cur_mode = MODE__jaaql
+
+    if len(sys.argv) < 3 and (is_script or is_jaaql):
         print_error("Must supply credentials file as argument in script mode")
 
     if len(sys.argv) < 2:
         print("Type jaaql url or file [config_file_location]")
-        jaaql_url, username, password = handle_login(input("LOGIN>").strip())
+        jaaql_url, username, password, fetched_database = handle_login(input("LOGIN>").strip())
     else:
-        jaaql_url, username, password = load_from_config_file([arg for arg in args if arg not in ['-s', '--script']][0])
+        jaaql_url, username, password, fetched_database = load_from_config_file([arg for arg in args if arg not in ['-s', '--script', '-j',
+                                                                                                                    '--jaaql']][0])
 
-    cur_mode = MODE__sql
     was_login = False
     was_eof = False
 
@@ -254,15 +300,22 @@ if __name__ == "__main__":
                         was_real_eof = False
                         raise EOFError()
                 else:
-                    if is_script:
-                        fetched_stdin = input()
+                    if is_script or is_jaaql:
+                        if (is_script or is_jaaql) and len(sys.argv) == 4:
+                            was_eof = True
+                            fetched_query = open(sys.argv[3], "r").read()
+                            raise EOFError()
+                        else:
+                            fetched_stdin = input()
+                            print("STDIN: " + fetched_stdin)
                     else:
-                        fetched_stdin = input("JAAQL>")
+                        fetched_stdin = input("JAAQL> ")
             except EOFError:
                 was_eof = was_real_eof
                 fetched_stdin = COMMAND__go
 
-            fetched_stdin = fetched_stdin.strip()
+            if fetched_stdin is not None:
+                fetched_stdin = fetched_stdin.strip()
 
         if oauth_token is None:
             oauth_token = fetch_oauth_token(jaaql_url, username, password, was_login)
@@ -278,7 +331,7 @@ if __name__ == "__main__":
         else:
             if fetched_stdin == COMMAND__login or was_login:
                 oauth_token = None
-                jaaql_url, username, password = handle_login()
+                jaaql_url, username, password, fetched_database = handle_login()
                 was_login = True
             elif fetched_stdin.startswith(COMMAND__mode + " "):
                 if len(fetched_query) != 0:
@@ -319,7 +372,7 @@ if __name__ == "__main__":
                 print(COMMAND__input + " [file]: Inputs a file")
             elif fetched_stdin.startswith(COMMAND__switch + " "):
                 oauth_token = None
-                jaaql_url, username, password = load_from_config_file(fetched_stdin.split(" ")[1])
+                jaaql_url, username, password, fetched_database = load_from_config_file(fetched_stdin.split(" ")[1])
                 print("Now directing to " + username + "@" + jaaql_url)
             elif not do_go and not do_print and fetched_stdin != COMMAND__exit:
                 fetched_query += fetched_stdin + "\n"
