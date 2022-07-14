@@ -257,7 +257,7 @@ if __name__ == "__main__":
                     if is_script:
                         fetched_stdin = input()
                     else:
-                        fetched_stdin = input("JAAQL>")
+                        fetched_stdin = input("JAAQL> ")
             except EOFError:
                 was_eof = was_real_eof
                 fetched_stdin = COMMAND__go
