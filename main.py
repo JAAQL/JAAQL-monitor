@@ -307,7 +307,6 @@ if __name__ == "__main__":
                             raise EOFError()
                         else:
                             fetched_stdin = input()
-                            print("STDIN: " + fetched_stdin)
                     else:
                         fetched_stdin = input("JAAQL> ")
             except EOFError:
