@@ -23,4 +23,4 @@ To build you will need to have a python environment (3.8) setup locally. Buildin
     pyinstaller -F main.py
 
 # Running locally
-Please install requirements.txt. Using python 3.8
+Please install requirements.txt. Using python 3.11

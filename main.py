@@ -82,7 +82,10 @@ def load_from_config_file(file_name, db_specified: str = None):
         database = None
         if len(config) > 4:
             database = config[4].strip()
-            print("Found database " + database)
+            if len(database) == 0:
+                database = None
+            else:
+                print("Found database '" + database + "'")
         if database is None and db_specified:
             database = db_specified
 
