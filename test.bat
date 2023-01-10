@@ -1,1 +1,1 @@
-C:\Users\aaron\Documents\JAAQL-monitor\Scripts\python.exe main.py -c C:\Users\aaron\Desktop\credentials.txt -s -v <C:\Users\aaron\Desktop\execute.jaaql
+C:\Users\aaron\Documents\JAAQL-monitor\Scripts\python.exe main.py -c first C:\Users\aaron\Desktop\credentials.txt -c other C:\Users\aaron\Desktop\credentials2.txt -s -v <C:\Users\aaron\Desktop\execute.jaaql

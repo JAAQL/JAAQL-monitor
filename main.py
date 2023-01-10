@@ -3,6 +3,7 @@ import requests
 import json
 from sys import exit
 from getpass import getpass
+from inspect import getframeinfo, stack
 
 import urllib
 
@@ -20,6 +21,8 @@ COMMAND__login = "\l"
 COMMAND__reset = "\\r"
 COMMAND__input = "\i"
 
+DEFAULT_CONNECTION = "default"
+
 MODE__sql = "sql"
 MODE__jaaql = "jaaql"
 ALLOWED_MODES = [MODE__sql, MODE__jaaql]
@@ -30,13 +33,6 @@ ROWS_MAX = 25
 
 class EOFMarker:
     pass
-
-
-def print_error(err, do_exit=True):
-    print(err, file=sys.stderr)
-    if do_exit:
-        print(err, file=sys.stdout)
-        exit(1)
 
 
 def fetch_oauth_token(jaaql_url, tenant, username, password, was_login):
@@ -71,7 +67,12 @@ def format_url(url_input: str):
     return url_input
 
 
-def load_from_config_file(file_name, db_specified: str = None):
+def load_from_config_file(file_name, credentials_name: str = None):
+    global connection_info
+
+    if credentials_name and credentials_name in connection_info:
+        return connection_info[credentials_name]
+
     try:
         config = open(file_name, "r").read()
         config = split_by_lines(config)
@@ -86,14 +87,18 @@ def load_from_config_file(file_name, db_specified: str = None):
                 database = None
             else:
                 log("Found database '" + database + "'")
-        if database is None and db_specified:
-            database = db_specified
 
         log("Successfully loaded config")
 
+        if credentials_name:
+            connection_info[credentials_name] = jaaql_url, tenant, username, password, database
+
         return jaaql_url, tenant, username, password, database
     except FileNotFoundError:
-        print_error("Could not find file " + file_name, True)
+        if credentials_name is None:
+            print_error("Could not find credentials file located at '" + file_name + "'", True)
+        else:
+            print_error("Could not find named credentials file '" + credentials_name + "' located at '" + file_name + "'", True)
 
 
 def format_output_row(data, max_length, data_types, breaches):
@@ -177,7 +182,7 @@ def format_query_output(json_output):
     log(str_num_rows)
 
 
-def handle_login(jaaql_url: str = None, db_specified: str = None):
+def handle_login(jaaql_url: str = None):
     load_file = False
     tenant = None
     username = None
@@ -185,7 +190,7 @@ def handle_login(jaaql_url: str = None, db_specified: str = None):
     if not jaaql_url:
         jaaql_url = input("Jaaql Url: ")
     elif jaaql_url.startswith("file "):
-        return load_from_config_file(jaaql_url.split("file ")[1], db_specified)
+        return load_from_config_file(jaaql_url.split("file ")[1])
 
     if not load_file:
         tenant = input("Tenant: ").strip()
@@ -197,13 +202,28 @@ def handle_login(jaaql_url: str = None, db_specified: str = None):
 
 was_go = False
 fetched_query = ""
-oauth_token = None
 fetched_stdin = None
 is_script = False
 cur_mode = MODE__sql
+connections = {}
+connection_info = {}
+connection_tokens = {}
+current_connection = DEFAULT_CONNECTION
 fetched_database = None
 set_role = None
 is_verbose = False
+
+
+def print_error(err, do_exit=True):
+    global is_script
+    caller = getframeinfo(stack()[1][0])
+    debug_message = " [%s:%d]" % (caller.filename, caller.lineno)
+    if not is_script:
+        debug_message = ""
+    print(err + debug_message, file=sys.stderr)
+    if do_exit:
+        print(err + debug_message, file=sys.stdout)
+        exit(1)
 
 
 def log(msg):
@@ -215,11 +235,17 @@ def log(msg):
 def on_go():
     global is_script
     global fetched_query
-    global oauth_token
     global was_go
+    global current_connection
+    global connections
+    global connection_tokens
     global fetched_stdin
     global fetched_database
     global cur_mode
+
+    if current_connection not in connections:
+        print_error("You are missing a default connection. Please start your script with \\s connection_name if you wish to use only "
+                    "named connections")
 
     was_go = False
     res = None
@@ -231,7 +257,7 @@ def on_go():
             send_json["database"] = fetched_database
         if set_role is not None:
             send_json["role"] = set_role
-        res = requests.post(jaaql_url + the_endpoint, json=send_json, headers=oauth_token)
+        res = requests.post(jaaql_url + the_endpoint, json=send_json, headers=connection_tokens.get(current_connection))
     else:
         if '\g' in fetched_stdin:
             fetched_stdin = fetched_query
@@ -262,7 +288,8 @@ def on_go():
             log(command_split[0].split(" ")[0] + " " + jaaql_url + url_part_one + url_part_two)
             if pass_json == {}:
                 pass_json = None
-            res = requests.request(command_split[0].split(" ")[0], jaaql_url + url_part_one + url_part_two, json=pass_json, headers=oauth_token)
+            res = requests.request(command_split[0].split(" ")[0], jaaql_url + url_part_one + url_part_two, json=pass_json,
+                                   headers=connection_tokens.get(current_connection))
             if pass_json is not None:
                 log(json.dumps(pass_json))
             log(res.status_code)
@@ -276,7 +303,7 @@ def on_go():
 
     if res.status_code == 401:
         was_go = True
-        oauth_token = None
+        connection_tokens[current_connection] = None
         log("Refreshing oauth token")
     elif res.status_code == 200:
         if cur_mode == MODE__sql:
@@ -293,33 +320,43 @@ if __name__ == "__main__":
     is_jaaql = len([arg for arg in args if arg in ['-j', '--jaaql']]) != 0
     is_verbose = len([arg for arg in args if arg in ['-v', '--verbose']]) != 0
 
-    db_specified = None
-    has_database = len([arg for arg in args if arg in ['-d', '--database']]) != 0
-    if has_database:
-        db_specified = args[[arg_idx for arg, arg_idx in zip(args, range(len(args))) if arg in ['-d', '--database']][0] + 1]
-
     has_role = len([arg for arg in args if arg in ['-r', '--role']]) != 0
     if has_role:
         set_role = args[[arg_idx for arg, arg_idx in zip(args, range(len(args))) if arg in ['-r', '--role']][0] + 1]
 
     has_config = len([arg for arg in args if arg in ['-c', '--config']]) != 0
-    config_specified = None
     if has_config:
-        config_specified = args[[arg_idx for arg, arg_idx in zip(args, range(len(args))) if arg in ['-c', '--config']][0] + 1]
+        for arg, arg_idx in zip(args, range(len(args))):
+            if arg not in ['-c', '--config']:
+                continue
+            if arg_idx == len(args) - 1:
+                print_error("The config flag is the last argument. You need to supply a file")
+            configuration_name = args[arg_idx + 1]
+            candidate_file_name = None
+            if arg_idx < len(args) - 1:
+                candidate_file_name = args[arg_idx + 2]
+            if candidate_file_name is None or candidate_file_name.startswith("<") or candidate_file_name.startswith("-"):
+                candidate_file_name = configuration_name
+                configuration_name = current_connection
+            if configuration_name in connections:
+                print_error("The configuration with name '" + configuration_name + "' already exists")
+            connections[configuration_name] = candidate_file_name
 
     if is_jaaql:
         cur_mode = MODE__jaaql
 
-    if not has_config and (is_script or is_jaaql):
+    if not has_config and is_script:
         print_error("Must supply credentials file as argument in script mode")
 
-    if has_config:
-        jaaql_url, tenant, username, password, fetched_database = load_from_config_file(config_specified, db_specified=db_specified)
-    else:
+    jaaql_url = None
+    if has_config and connections.get(DEFAULT_CONNECTION):
+        jaaql_url, tenant, username, password, fetched_database = load_from_config_file(connections[current_connection], current_connection)
+    elif not is_script:
         print("Type jaaql url or \"file [config_file_location]\"")
-        jaaql_url, tenant, username, password, fetched_database = handle_login(input("LOGIN>").strip(), db_specified=db_specified)
+        jaaql_url, tenant, username, password, fetched_database = handle_login(input("LOGIN>").strip())
 
-    log("Using url: " + jaaql_url)
+    if jaaql_url is not None:
+        log("Using url: " + jaaql_url)
 
     was_login = False
     was_eof = False
@@ -353,9 +390,10 @@ if __name__ == "__main__":
             if fetched_stdin is not None:
                 fetched_stdin = fetched_stdin.strip()
 
-        if oauth_token is None:
-            oauth_token = fetch_oauth_token(jaaql_url, tenant, username, password, was_login)
-            was_login = oauth_token is None
+        if connection_tokens.get(current_connection) is None and current_connection in connections:
+            connection_tokens[current_connection] = fetch_oauth_token(jaaql_url, tenant, username, password,
+                                                                      connection_tokens.get(current_connection) is None)
+            was_login = connection_tokens.get(current_connection) is None
 
         if COMMAND__go in fetched_stdin:
             do_go = True
@@ -371,7 +409,7 @@ if __name__ == "__main__":
                 was_login = True
             elif fetched_stdin.startswith(COMMAND__mode + " "):
                 if len(fetched_query.strip()) != 0:
-                    print_error("Cannot switch modes while buffer is not empty. Please submit with \g", is_script)
+                    print_error("Cannot switch modes while buffer is not empty. Please submit with \\g or clear with \\r", is_script)
                 else:
                     fetched_mode = fetched_stdin.split(" ")[1]
 
@@ -383,7 +421,7 @@ if __name__ == "__main__":
                         cur_mode = fetched_mode
             elif fetched_stdin.startswith(COMMAND__input + " "):
                 if fetched_query != "":
-                    print_error("Cannot load file until you have flushed your current buffer with \g", is_script)
+                    print_error("Cannot load file until you have flushed your current buffer with \\g or reset with \\r", is_script)
                 else:
                     load_file = fetched_stdin.split(" ")[1]
                     try:
@@ -407,9 +445,23 @@ if __name__ == "__main__":
                 print(COMMAND__reset + ": clears the input buffer")
                 print(COMMAND__input + " [file]: Inputs a file")
             elif fetched_stdin.startswith(COMMAND__switch + " "):
-                oauth_token = None
-                jaaql_url, tenant, username, password, fetched_database = load_from_config_file(fetched_stdin.split(" ")[1])
-                log("Now directing to " + username + "@" + jaaql_url)
+                if len(fetched_query.strip()) != 0:
+                    print_error("Cannot switch credentials while buffer is not empty. Please submit with \\g or reset with \\r", is_script)
+                else:
+                    possible_file_name = fetched_stdin.split(" ")[1]
+                    connection = None
+                    if possible_file_name in connections:
+                        connection = possible_file_name
+                        possible_file_name = connections[possible_file_name]
+
+                    jaaql_url, tenant, username, password, fetched_database = load_from_config_file(possible_file_name, connection)
+                    if connection is not None:
+                        log("Switching to named connection '" + connection + '"')
+                        current_connection = connection
+                    else:
+                        connection_info[current_connection] = jaaql_url, tenant, username, password, fetched_database
+                        connection_tokens = {}
+                        log("Now directing to " + username + "@" + jaaql_url)
             elif not do_go and not do_print and fetched_stdin != COMMAND__exit:
                 fetched_query += fetched_stdin + "\n"
             elif do_go or do_print:
