@@ -4,6 +4,7 @@ import json
 from sys import exit
 from getpass import getpass
 from inspect import getframeinfo, stack
+import os
 
 import urllib
 
@@ -96,9 +97,9 @@ def load_from_config_file(file_name, credentials_name: str = None):
         return jaaql_url, tenant, username, password, database
     except FileNotFoundError:
         if credentials_name is None:
-            print_error("Could not find credentials file located at '" + file_name + "'", True)
+            print_error("Could not find credentials file located at '" + file_name + "', using working directory " + os.getcwd(), True)
         else:
-            print_error("Could not find named credentials file '" + credentials_name + "' located at '" + file_name + "'", True)
+            print_error("Could not find named credentials file '" + credentials_name + "' located at '" + file_name + "', using working directory " + os.getcwd(), True)
 
 
 def format_output_row(data, max_length, data_types, breaches):
