@@ -1,63 +1,140 @@
-import traceback
-
 from version import print_version
 import sys
 import requests
-import json
 from sys import exit
 from getpass import getpass
 from inspect import getframeinfo, stack
 import os
 
-import urllib
-
 ENDPOINT__oauth = "/oauth/token"
 ENDPOINT__submit = "/submit"
+ENDPOINT__attach = "/accounts"
+ENDPOINT__dispatchers = "/internal/dispatchers"
+ENDPOINT__wipe = "/internal/clean"
 
-COMMAND__exit = "\q"
-COMMAND__print = "\p"
-COMMAND__transactional = "\\t"
-COMMAND__go = "\g"
-COMMAND__mode = "\m"
-COMMAND__mode_long = "\mode"
-COMMAND__help = "\h"
-COMMAND__switch = "\s"
-COMMAND__connect = "\c"
-COMMAND__connect_long = "\connect"
-COMMAND__switch_long = "\switch"
-COMMAND__login = "\l"
-COMMAND__reset = "\\r"
-COMMAND__input = "\i"
+COMMAND__initialiser = "\\"
+COMMAND__reset_short = "\\r"
+COMMAND__reset = "\\reset"
+COMMAND__go_short = "\g"
+COMMAND__go = "\go"
+COMMAND__print_short = "\p"
+COMMAND__print = "\print"
+COMMAND__wipe_dbms = "\wipe dbms"
+COMMAND__switch_jaaql_account_to = "\switch jaaql account to "
+COMMAND__connect_to_database = "\connect to database "
+COMMAND__register_jaaql_account_with = "\\register jaaql account with "
+COMMAND__attach_email_account = "\\attach email account "
+COMMAND__quit = "\quit"
+
+CONNECT_FOR_CREATEDB = " for createdb"
 
 DEFAULT_CONNECTION = "default"
-
-MODE__sql = "sql"
-MODE__jaaql = "jaaql"
-ALLOWED_MODES = [MODE__sql, MODE__jaaql]
+DEFAULT_EMAIL_ACCOUNT = "default"
 
 LINE_LENGTH_MAX = 115
 ROWS_MAX = 25
+
+METHOD__post = "POST"
+METHOD__get = "GET"
 
 
 class EOFMarker:
     pass
 
 
-def fetch_oauth_token(jaaql_url, username, password, was_login):
-    try:
-        oauth_res = requests.post(jaaql_url + ENDPOINT__oauth, json={
-            "username": username,
-            "password": password
-        })
+class ConnectionInfo:
+    def __init__(self, host, username, password, database):
+        self.host = host
+        self.username = username
+        self.password = password
+        self.database = database
+        self.oauth_token = None
 
-        if oauth_res.status_code != 200:
-            print_error("Invalid credentials: response code " + str(oauth_res.status_code) + " content: " + oauth_res.text, was_login)
-            return None
+    def get_port(self):
+        return int(self.host.split(":")[1])
 
-        return {"Authentication-Token": oauth_res.json()}
-    except requests.exceptions.RequestException:
-        print_error("Could not connect to JAAQL running on " + jaaql_url + "\nPlease make sure that JAAQL is running and accessible")
-        return None
+    def get_http_url(self):
+        formatted = self.host
+        if not formatted.startswith("http"):
+            url_input = "https://www." + formatted
+            if not url_input.endswith("/api"):
+                url_input += "/api"
+        if formatted.startswith("http") and ":6060" not in formatted and not formatted.endswith("/api"):
+            formatted += "/api"
+        return formatted
+
+
+class State:
+    def __init__(self):
+        self.was_go = False
+        self.fetched_query = ""
+        self.fetched_stdin = None
+        self.connections = {}
+        self.connection_info = {}
+        self._current_connection = None
+        self.fetched_database = None
+        self.is_verbose = False
+        self.is_debugging = False
+        self.file_name = None
+        self.cur_file_line = 0
+        self.file_lines = []
+
+        self.database_override = None
+        self.is_transactional = True
+
+    def set_current_connection(self, connection: ConnectionInfo):
+        self._current_connection = connection
+        self.database_override = None
+        self.is_transactional = True
+
+    def is_script(self):
+        return self.file_name is not None
+
+    def get_current_connection(self) -> ConnectionInfo:
+        if self._current_connection is None:
+            print_error(self, "There is no selected connection. Please supply a default connection or switch to a connection first")
+
+        return self._current_connection
+
+    def log(self, msg):
+        if self.is_verbose:
+            print(str(msg))
+
+    def _fetch_oauth_token_for_current_connection(self):
+        conn = self.get_current_connection()
+        try:
+            oauth_res = requests.post(conn.get_http_url() + ENDPOINT__oauth, json={
+                "username": conn.username,
+                "password": conn.password
+            })
+
+            if oauth_res.status_code != 200:
+                print_error(self, "Invalid credentials: response code " + str(oauth_res.status_code) + " content: " + oauth_res.text)
+                return None
+
+            conn.oauth_token = {"Authentication-Token": oauth_res.json()}
+        except requests.exceptions.RequestException:
+            print_error(self, "Could not connect to JAAQL running on " + conn.host + "\nPlease make sure that JAAQL is running and accessible")
+
+    def request_handler(self, method, endpoint, send_json=None, handle_error: bool = True):
+        conn = self.get_current_connection()
+        if conn.oauth_token is None:
+            self._fetch_oauth_token_for_current_connection()
+
+        res = requests.request(method, conn.get_http_url() + endpoint, json=send_json, headers=conn.oauth_token)
+
+        if res.status_code == 401:
+            self._fetch_oauth_token_for_current_connection()
+            self.log("Refreshing oauth token")
+            res = requests.request(method, conn.get_http_url() + endpoint, json=send_json, headers=conn.oauth_token)
+
+        if res.status_code == 200:
+            format_query_output(self, res.json())
+        else:
+            if handle_error:
+                print_error(self, res.text)
+
+        return res
 
 
 def split_by_lines(split_str, gap=1):
@@ -67,27 +144,21 @@ def split_by_lines(split_str, gap=1):
     return [s for s in split_str if len(s.strip()) != 0]
 
 
-def format_url(url_input: str):
-    url_input = url_input.strip()
-    if not url_input.startswith("http"):
-        url_input = "https://www." + url_input
-        if not url_input.endswith("/api"):
-            url_input += "/api"
-    if url_input.startswith("http") and ":6060" not in url_input and not url_input.endswith("/api"):
-        url_input += "/api"
-    return url_input
+def get_connection_info(state: State, connection_name: str = None, file_name: str = None):
+    if connection_name and connection_name in state.connection_info:
+        return state.connection_info[connection_name]
+    elif connection_name and connection_name in state.connections:
+        file_name = state.connections[connection_name]
 
-
-def load_from_config_file(file_name, credentials_name: str = None):
-    global connection_info
-
-    if credentials_name and credentials_name in connection_info:
-        return connection_info[credentials_name]
+    if file_name is None and connection_name is None:
+        print_error(state, "Error in the python script. A connection is being fetched without a name or file")
+    elif file_name is None:
+        print_error(state, "No named connection: '" + connection_name + "'")
 
     try:
         config = open(file_name, "r").read()
         config = split_by_lines(config)
-        jaaql_url = format_url(config[0])
+        host = config[0].strip()
         username = config[1].strip()
         password = config[2].strip()
         database = None
@@ -96,19 +167,22 @@ def load_from_config_file(file_name, credentials_name: str = None):
             if len(database) == 0:
                 database = None
             else:
-                log("Found database '" + database + "'")
+                state.log("Found database '" + database + "'")
 
-        log("Successfully loaded config")
+        state.log("Successfully loaded config")
 
-        if credentials_name:
-            connection_info[credentials_name] = jaaql_url, username, password, database
+        ci = ConnectionInfo(host, username, password, database)
 
-        return jaaql_url, username, password, database
+        if connection_name:
+            state.connection_info[connection_name] = ci
+
+        return ci
     except FileNotFoundError:
-        if credentials_name is None:
-            print_error("Could not find credentials file located at '" + file_name + "', using working directory " + os.getcwd(), True)
+        if connection_name is None:
+            print_error(state, "Could not find credentials file located at '" + file_name + "', using working directory " + os.getcwd())
         else:
-            print_error("Could not find named credentials file '" + credentials_name + "' located at '" + file_name + "', using working directory " + os.getcwd(), True)
+            print_error(state, "Could not find named credentials file '" + connection_name + "' located at '" + file_name +
+                        "', using working directory " + os.getcwd())
 
 
 def format_output_row(data, max_length, data_types, breaches):
@@ -141,7 +215,7 @@ def format_output_divider(max_length):
     return builder
 
 
-def format_query_output(json_output):
+def format_query_output(state, json_output):
     if "rows" not in json_output:
         return None
     str_num_rows = "(" + str(len(json_output["rows"])) + " " + ("row" if len(json_output["rows"]) == 1 else "rows") + ")"
@@ -175,197 +249,213 @@ def format_query_output(json_output):
         for col in json_output["columns"]:
             max_length.append(len(col))
 
-    log(format_output_divider(max_length))
-    log(format_output_row(json_output["columns"], max_length, [str] * len(json_output["columns"]), [False] * len(max_length)))
-    log(format_output_divider(max_length))
+    state.log(state, format_output_divider(max_length))
+    state.log(state, format_output_row(json_output["columns"], max_length, [str] * len(json_output["columns"]), [False] * len(max_length)))
+    state.log(state, format_output_divider(max_length))
 
     if len(json_output["rows"]) > ROWS_MAX:
         json_output["rows"] = json_output["rows"][0:ROWS_MAX]
         json_output["rows"].append(["..." for _ in json_output["columns"]])
 
     for row in json_output["rows"]:
-        log(format_output_row(row, max_length, types, breaches))
+        state.log(format_output_row(row, max_length, types, breaches))
 
     if len(json_output["rows"]) != 0:
-        log(format_output_divider(max_length))
+        state.log(format_output_divider(max_length))
 
-    log(str_num_rows)
+    state.log(str_num_rows)
 
 
-def handle_login(jaaql_url: str = None):
+def handle_login(state, jaaql_url: str = None):
     load_file = False
     username = None
     password = None
     if not jaaql_url:
         jaaql_url = input("Jaaql Url: ")
     elif jaaql_url.startswith("file "):
-        return load_from_config_file(jaaql_url.split("file ")[1])
+        return get_connection_info(state, file_name=jaaql_url.split("file ")[1])
 
     if not load_file:
         username = input("Username: ").strip()
         password = getpass(prompt='Password: ', stream=None)
 
-    return format_url(jaaql_url), username, password, None
+    return ConnectionInfo(jaaql_url, username, password, None)
 
 
-was_go = False
-fetched_query = ""
-fetched_stdin = None
-is_transactional = True
-is_script = False
-cur_mode = MODE__sql
-connections = {}
-connection_info = {}
-connection_tokens = {}
-current_connection = DEFAULT_CONNECTION
-fetched_database = None
-set_role = None
-is_verbose = False
-is_debugging = False
-file_name = None
-cur_file_line = 0
+def dump_buffer(state, start: str = "\n\n"):
+    return ("%sBuffer was length " % start) + str(len(state.fetched_query.strip())) + " wih contents:\n" + state.fetched_query.strip() + "\n\n"
 
 
-def dump_buffer():
-    global fetched_query
-    return "\n\nBuffer was length " + str(len(fetched_query.strip())) + " wih contents:\n" + fetched_query.strip() + "\n\n"
-
-
-def print_error(err, do_exit=True, line_offset: int = 0, dump_exc: str = None):
-    global is_script
-    global file_name
-    global is_debugging
-    global cur_file_line
-
+def print_error(state, err, line_offset: int = 0, dump_exc: str = None):
     caller = getframeinfo(stack()[1][0])
     file_message = ""
-    if file_name is not None:
-        file_message = "Error on line %d of file '%s':\n\n" % (cur_file_line - line_offset, file_name)
+    if state.file_name is not None:
+        file_message = "Error on line %d of file '%s':\n\n" % (state.cur_file_line - line_offset, state.file_name)
     debug_message = " [%s:%d]" % (caller.filename, caller.lineno)
-    if not is_script or not is_debugging:
+    if not state.is_script() or not state.is_debugging:
         debug_message = ""
-    print(file_message + err + debug_message, file=sys.stderr)
-    if do_exit:
-        print(file_message + err + debug_message, file=sys.stdout)
-
+    buffer = "\n" + dump_buffer(state, "")
+    if not state.is_script():
+        buffer = ""
+    print(file_message + err + debug_message + buffer, file=sys.stderr)
+    if state.is_script():
         if dump_exc:
             print("\n\n" + dump_exc, file=sys.stderr)
-            print("\n\n" + dump_exc, file=sys.stdout)
 
         exit(1)
 
 
-def log(msg):
-    global is_verbose
-    if is_verbose:
-        print(str(msg))
+def wipe_jaaql_box(state: State):
+    res = state.request_handler(METHOD__post, ENDPOINT__wipe, handle_error=False)
+
+    if res.status_code != 200:
+        print_error(state, "Error wiping jaaql box, received status code %d and message:\n\n\t%s" % (res.status_code, res.text))
 
 
-def on_go():
-    global is_script
-    global fetched_query
-    global was_go
-    global current_connection
-    global connections
-    global is_transactional
-    global connection_tokens
-    global fetched_stdin
-    global fetched_database
-    global cur_mode
+def attach_email_account(state, connection_info: ConnectionInfo):
 
-    if current_connection not in connections:
-        print_error("You are missing a default connection. Please start your script with \\s connection_name if you wish to use only "
-                    "named connections")
+    res = requests.post(attach_jaaql_url + ENDPOINT__dispatchers, headers=attach_auth, json={
+        "name": attach_name,
+        "application": attach_application,
+        "url": attach_url,
+        "port": attach_port,
+        "username": attach_username,
+        "password": attach_password
+    })
 
-    was_go = False
-    res = None
+    if res.status_code == 200:
+        return
 
-    if cur_mode == MODE__sql:
-        send_json = {"query": fetched_query}
-        if fetched_database is not None:
-            send_json["database"] = fetched_database
-        if set_role is not None:
-            send_json["role"] = set_role
-        if not is_transactional:
-            send_json["autocommit"] = True
-        res = requests.post(jaaql_url + ENDPOINT__submit, json=send_json, headers=connection_tokens.get(current_connection))
-    else:
-        if '\g' in fetched_stdin:
-            fetched_stdin = fetched_query
-        commands = split_by_lines(fetched_stdin, 2)
-        last_res = {}
-        for command, x in zip(commands, range(len(commands))):
-            try:
-                if command.strip() == '\g' or len(command.strip()) == 0:
-                    continue
-                command_split = split_by_lines(command)
-                command_data = None
-                if len(command_split) != 1:
-                    command_data = "\r\n".join(command_split[1:])
-
-                if isinstance(last_res, dict) and command_data is not None:
-                    for key, val in last_res.items():
-                        if "{{" + key + "}}" in command_data:
-                            command_data = command_data.replace("{{" + key + "}}", val)
-                # print("========", file=sys.stderr)
-                # print(command_split, file=sys.stderr)
-                # print(command_split[0], file=sys.stderr)
-                # print(command_split[0].split(" "), file=sys.stderr)
-                # print("=======", file=sys.stderr)
-                url_part_one = command_split[0].split(" ")[1].split("?")[0]
-                url_part_two = ""
-                if len(command_split[0].split(" ")[1].split("?")) > 1:
-                    url_part_one = url_part_one + "?"
-                    url_part_two = "?".join(command_split[0].split(" ")[1].split("?")[1:])
-                    url_part_two = "&".join([urllib.parse.quote(part.split("=")[0]) + "=" + urllib.parse.quote(part.split("=")[1]) for part in url_part_two.split("&")])
-
-                pass_json = None
-                if command_data is not None and len(command_data.strip()) != 0:
-                    pass_json = json.loads(command_data)
-                log(command_split[0].split(" ")[0] + " " + jaaql_url + url_part_one + url_part_two)
-                if pass_json == {}:
-                    pass_json = None
-                res = requests.request(command_split[0].split(" ")[0], jaaql_url + url_part_one + url_part_two, json=pass_json,
-                                       headers=connection_tokens.get(current_connection))
-                if pass_json is not None:
-                    log(json.dumps(pass_json))
-                log(res.status_code)
-                if res.status_code == 200:
-                    if x != len(commands) - 1:
-                        log(json.dumps(res.json()))
-                    last_res = res.json()
-                else:
-                    fetched_query = "\r\n".join(commands[x:])
-                    break
-            except Exception as ex:
-                print_error("Unhandled error whilst processing command: '" + command + "'", line_offset=len(commands) - 1 - x, dump_exc=traceback.format_exc())
-
-    if res.status_code == 401:
-        was_go = True
-        connection_tokens[current_connection] = None
-        log("Refreshing oauth token")
-    elif res.status_code == 200:
-        if cur_mode == MODE__sql:
-            format_query_output(res.json())
-        fetched_query = ""
-    else:
-        print_error(res.text, is_script)
-        fetched_query = ""
+    print_error(state, "Error attaching email account '%s' to dispatcher '%s', received status code %d and message:\n\n\t%s" % (attach_credentials,
+                                                                                                                         attach_name,
+                                                                                                                         res.status_code, res.text))
 
 
-if __name__ == "__main__":
+def register_jaaql_account(state, connection_info: ConnectionInfo):
+    state.request_handler(METHOD__post, ENDPOINT__attach, send_json=send_json)
+
+    res = requests.post(attach_jaaql_url + ENDPOINT__attach, headers=attach_auth, json={
+        "username": connection_info.username,
+        "password": connection_info.password,
+        "attach_as": attach_role
+    })
+
+    if res.status_code == 200:
+        return
+
+    print_error(state, "Error attaching user '%s' to role '%s', received status code %d and message:\n\n\t%s" % (attach_username, attach_role,
+                                                                                                                 res.status_code, res.text))
+
+
+def on_go(state):
+    send_json = {"query": state.fetched_query}
+    cur_conn = state.get_current_connection()
+    if cur_conn.database is not None:
+        send_json["database"] = cur_conn.database
+    if state.database_override is not None:
+        send_json["database"] = state.database_override
+    if not state.is_transactional:
+        send_json["autocommit"] = True
+
+    state.request_handler(METHOD__post, ENDPOINT__submit, send_json=send_json)
+
+
+def parse_user_printing_any_errors(state, potential_user, allow_spaces: bool = False):
+    if " " in potential_user and not allow_spaces:
+        print_error(state, "Expected user without spaces, instead found spaces in user: '" + potential_user + "'")
+    if not potential_user.startswith("@"):
+        print_error(state, "Malformatted user, expected user to start with @")
+
+    return potential_user.split("@")[1]
+
+
+def deal_with_input(state: State):
+    if len(state.connections) == 0 and state.is_script():
+        print_error(state, "Must supply credentials file as argument in script mode")
+    if len(state.connections) != 0 and state.connections.get(DEFAULT_CONNECTION):
+        state.set_current_connection(get_connection_info(state, DEFAULT_CONNECTION))  # Preloads the default connection
+    elif not state.is_script():
+        print(state, "Type jaaql url or \"file [config_file_location]\"")
+        state.set_current_connection(handle_login(state, input("LOGIN>").strip()))
+
+    if state.is_script():
+        try:
+            state.file_lines = open(state.file_name, "r").readlines()
+            state.file_lines.append(EOFMarker())  # Ignore warning. We can have multiple types. This is python
+        except FileNotFoundError as ex:
+            print_error(state, "Could not load file for processing '" + state.file_name + "'")
+        except Exception as ex:
+            print_error(state, "Unhandled exception whilst processing file '" + state.file_name + "' " + str(ex))
+
+    while True:
+        fetched_line = None
+        try:
+            if len(state.file_lines) != 0:
+                fetched_line = state.file_lines[0]
+                state.cur_file_line += 1
+                state.file_lines = state.file_lines[1:]
+                if isinstance(fetched_line, EOFMarker):
+                    raise EOFError()
+        except EOFError:
+            pass
+
+        if fetched_line.startswith(COMMAND__initialiser):
+            if fetched_line == COMMAND__go or fetched_line == COMMAND__go_short:
+                on_go(state)
+                state.fetched_query = ""
+            elif fetched_line == COMMAND__reset or fetched_line == COMMAND__reset_short:
+                state.fetched_query = ""
+            elif fetched_line == COMMAND__print or fetched_line == COMMAND__print_short:
+                dump_buffer(state)
+            elif len(fetched_line) != 0:
+                print_error(state, "Tried to execute the command '" + fetched_line + "' but buffer was non empty." + dump_buffer(state))
+            elif fetched_line == COMMAND__wipe_dbms:
+                wipe_jaaql_box(state)
+            elif fetched_line.startswith(COMMAND__switch_jaaql_account_to):
+                candidate_connection_name = fetched_line.split(COMMAND__switch_jaaql_account_to)[1]
+                connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
+                state.set_current_connection(get_connection_info(state, connection_name=connection_name))
+            elif fetched_line.startswith(COMMAND__connect_to_database):
+                candidate_database = fetched_line.split(COMMAND__connect_to_database)[1].split(" ")[0]
+                if candidate_database.endswith(CONNECT_FOR_CREATEDB):
+                    state.is_transactional = False
+                state.database_override = candidate_database.split(CONNECT_FOR_CREATEDB)[0]
+            elif fetched_line.startswith(COMMAND__register_jaaql_account_with):
+                candidate_connection_name = fetched_line.split(COMMAND__register_jaaql_account_with)[1]
+                connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
+
+                register_jaaql_account(state, get_connection_info(state, connection_name=connection_name))
+            elif fetched_line.startswith(COMMAND__attach_email_account):
+                candidate_connection_name = fetched_line.split(COMMAND__register_jaaql_account_with)[1]
+                connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
+
+                attach_email_account(state, get_connection_info(state, connection_name=connection_name))
+            elif fetched_line == COMMAND__quit:
+                break
+            else:
+                print_error(state, "Unrecognised command '" + fetched_line + "'")
+        else:
+            if len(state.fetched_query) != 0 or len(fetched_line) != 0:
+                state.fetched_query += fetched_line  # Do not pre-append things with empty lines
+
+    if len(state.fetched_query) != 0:
+        print_error(state, "Attempting to quit with non-empty buffer." + dump_buffer(state) + "Please submit with \\g or clear with \\r")
+
+
+def initialise_from_args():
+    state = State()
+
     args = sys.argv[1:]
-    is_script = len([arg for arg in args if arg in ['-s', '--sql']]) != 0 or len([arg for arg in args if arg in ['-j', '--jaaql']]) != 0
-    is_jaaql = len([arg for arg in args if arg in ['-j', '--jaaql']]) != 0
-    is_verbose = len([arg for arg in args if arg in ['-v', '--verbose']]) != 0
-    is_debugging = len([arg for arg in args if arg in ['-d', '--debugging']]) != 0
 
-    if is_verbose:
+    file_name = [idx for arg, idx in zip(args, range(len(args))) if arg in ['-f', '--file']]
+    if len(file_name) != 0:
+        state.file_name = args[file_name[0] + 1]
+
+    state.is_verbose = len([arg for arg in args if arg in ['-v', '--verbose']]) != 0
+    state.is_debugging = len([arg for arg in args if arg in ['-d', '--debugging']]) != 0
+
+    if state.is_verbose:
         print_version()
-
-    has_role = len([arg for arg in args if arg in ['-r', '--role']]) != 0
-    if has_role:
-        set_role = args[[arg_idx for arg, arg_idx in zip(args, range(len(args))) if arg in ['-r', '--role']][0] + 1]
 
     has_config = len([arg for arg in args if arg in ['-c', '--config']]) != 0
     if has_config:
@@ -373,194 +463,24 @@ if __name__ == "__main__":
             if arg not in ['-c', '--config']:
                 continue
             if arg_idx == len(args) - 1:
-                print_error("The config flag is the last argument. You need to supply a file")
+                print_error(state, "The config flag is the last argument. You need to supply a file")
             configuration_name = args[arg_idx + 1]
             candidate_file_name = None
-            if arg_idx < len(args) - 1:
+            if arg_idx < len(args) - 2:
                 candidate_file_name = args[arg_idx + 2]
+
+            # The following branch of logic will use the supplied configuration name as the file name and set the configuration name to default
             if candidate_file_name is None or candidate_file_name.startswith("<") or candidate_file_name.startswith("-"):
                 candidate_file_name = configuration_name
-                configuration_name = current_connection
-            if configuration_name in connections:
-                print_error("The configuration with name '" + configuration_name + "' already exists")
-            connections[configuration_name] = candidate_file_name
+                configuration_name = DEFAULT_CONNECTION
 
-    file_name = [idx for arg, idx in zip(args, range(len(args))) if arg in ['-f', '--file']]
-    if not is_script and len(file_name) != 0:
-        print_error("Cannot supply a file when in interactive mode. You must be in script mode")
-    if len(file_name) != 0:
-        file_name = args[file_name[0] + 1]
-    else:
-        file_name = None
+            if configuration_name in state.connections:
+                print_error(state, "The configuration with name '" + configuration_name + "' already exists")
 
-    if is_jaaql:
-        cur_mode = MODE__jaaql
+            state.connections[configuration_name] = candidate_file_name
 
-    if not has_config and is_script:
-        print_error("Must supply credentials file as argument in script mode")
+    deal_with_input(state)
 
-    jaaql_url = None
-    if has_config and connections.get(DEFAULT_CONNECTION):
-        jaaql_url, username, password, fetched_database = load_from_config_file(connections[current_connection], current_connection)
-    elif not is_script:
-        print("Type jaaql url or \"file [config_file_location]\"")
-        jaaql_url, username, password, fetched_database = handle_login(input("LOGIN>").strip())
 
-    if jaaql_url is not None:
-        log("Using url: " + jaaql_url)
-
-    was_login = False
-    was_eof = False
-
-    file_lines = []
-    cur_file_line = 0
-
-    if file_name is not None:
-        try:
-            file_lines = open(file_name, "r").readlines()
-            file_lines.append(EOFMarker())
-        except FileNotFoundError as ex:
-            print_error("Could not load file for processing '" + file_name + "'")
-        except Exception as ex:
-            print_error("Unhandled exception whilst processing file '" + file_name + "' " + str(ex))
-
-    while fetched_stdin != COMMAND__exit and not was_eof:
-        do_go = False
-        do_print = False
-
-        if fetched_stdin is None:
-            was_real_eof = True
-            try:
-                if len(file_lines) != 0:
-                    fetched_stdin = file_lines[0]
-                    cur_file_line += 1
-                    file_lines = file_lines[1:]
-                    if isinstance(fetched_stdin, EOFMarker):
-                        file_name = None
-                        cur_file_line = 0
-                        was_real_eof = False
-                        raise EOFError()
-                else:
-                    if is_script or is_jaaql:
-                        fetched_stdin = input()
-                    else:
-                        fetched_stdin = input("JAAQL> ")
-            except EOFError:
-                if len(fetched_query.strip()) != 0:
-                    print_error("Buffer was not empty when exiting." + dump_buffer() + "Please submit with /g before ending the script")
-                was_eof = was_real_eof
-                fetched_stdin = COMMAND__go
-
-            if fetched_stdin is not None:
-                fetched_stdin = fetched_stdin.strip()
-
-        if connection_tokens.get(current_connection) is None and current_connection in connections:
-            connection_tokens[current_connection] = fetch_oauth_token(jaaql_url, username, password,
-                                                                      connection_tokens.get(current_connection) is None)
-            was_login = connection_tokens.get(current_connection) is None
-
-        if COMMAND__go in fetched_stdin:
-            do_go = True
-        if COMMAND__print in fetched_stdin:
-            do_print = True
-
-        if was_go:
-            on_go()
-        else:
-            if fetched_stdin == COMMAND__login or was_login:
-                oauth_token = None
-                jaaql_url, username, password, fetched_database = handle_login()
-                was_login = True
-            elif fetched_stdin.startswith(COMMAND__mode + " ") or fetched_stdin.startswith(COMMAND__mode_long + " "):
-                fetched_mode = fetched_stdin.split(" ")[1]
-
-                if len(fetched_query.strip()) != 0:
-                    print_error("Cannot switch modes from '" + cur_mode + "' to '" + fetched_mode + "' unless buffer is empty." + dump_buffer() + "Please submit with \\g or clear with \\r", is_script)
-                else:
-                    if fetched_mode not in ALLOWED_MODES:
-                        print_error("Mode '" + fetched_mode + "' not allowed. Allowed modes " + str(ALLOWED_MODES), is_script)
-                    elif fetched_mode == cur_mode and not is_script:
-                        print_error("Cannot switch to mode '" + cur_mode + "' as this is already the current processing mode", is_script)
-                    else:
-                        is_transactional = True
-                        cur_mode = fetched_mode
-            elif fetched_stdin.startswith(COMMAND__input + " "):
-                if fetched_query != "":
-                    print_error("Cannot load file until unless buffer is empty." + dump_buffer() + "Please submit with \\g or clear with \\r", is_script)
-                else:
-                    load_file = fetched_stdin.split(" ")[1]
-                    file_name = load_file
-                    try:
-                        file_lines = open(load_file, "r").readlines()
-                        file_lines.append(EOFMarker())
-                        log("Loaded file " + load_file)
-                    except FileNotFoundError:
-                        print_error("Cannot find file " + load_file, is_script)
-            elif fetched_stdin.startswith(COMMAND__connect + " ") or fetched_stdin.startswith(COMMAND__connect_long + " "):
-                if len(fetched_query.strip()) != 0:
-                    print_error("Cannot connect to a new database unless buffer is empty." + dump_buffer() + "Please submit with \\g or clear with \\r", is_script)
-                fetched_database = fetched_stdin.split(" ")[1]
-                is_transactional = True
-            elif fetched_stdin == COMMAND__reset:
-                log("Resetting buffer")
-                fetched_query = ""
-            elif fetched_stdin == COMMAND__help:
-                print("JAAQL Monitor")
-                print(COMMAND__print + ": Prints the command that has been input so far")
-                print(COMMAND__go + ": Submits the command to jaaql")
-                print(COMMAND__mode + " [mode]: Switches the mode. Accepts either 'sql' or 'jaaql'")
-                print(COMMAND__exit + ": Exits the program")
-                print(COMMAND__login + ": Logs in")
-                print(COMMAND__switch + " [file]: Switches jaaql config files")
-                print(COMMAND__connect + " [database]: All further commands will go to this database")
-                print(COMMAND__reset + ": clears the input buffer")
-                print(COMMAND__input + " [file]: Inputs a file")
-            elif fetched_stdin.startswith(COMMAND__switch + " ") or fetched_stdin.startswith(COMMAND__switch_long + " "):
-                if len(fetched_query.strip()) != 0:
-                    print_error("Cannot switch credentials unless buffer is empty." + dump_buffer() + "Please submit with \\g or reset with \\r", is_script)
-                else:
-                    possible_file_name = fetched_stdin.split(" ")[1]
-                    connection = None
-                    if possible_file_name in connections:
-                        connection = possible_file_name
-                        possible_file_name = connections[possible_file_name]
-
-                    jaaql_url, username, password, fetched_database = load_from_config_file(possible_file_name, connection)
-                    if connection is not None:
-                        log("Switching to named connection '" + connection + '"')
-                        current_connection = connection
-                    else:
-                        connection_info[current_connection] = jaaql_url, username, password, fetched_database
-                        connection_tokens = {}
-                        log("Now directing to " + username + "@" + jaaql_url)
-
-                    is_transactional = True
-            elif fetched_stdin.startswith(COMMAND__transactional):
-                if len(fetched_query.strip()) != 0:
-                    print_error("Cannot toggle transactional mode unless buffer is empty." + dump_buffer() + "Please submit with \\g or reset with \\r", is_script)
-                is_transactional = not is_transactional
-            elif not do_go and not do_print and fetched_stdin != COMMAND__exit:
-                fetched_query += fetched_stdin + "\n"
-            elif do_go or do_print:
-                was_command = False
-                for i in range(len(fetched_stdin)):
-                    the_char = fetched_stdin[i]
-                    if the_char == "\\":
-                        was_command = True
-                    elif was_command and the_char == "p":
-                        log(fetched_query)
-                        was_command = False
-                    elif was_command and the_char == "g":
-                        on_go()
-                        was_command = False
-                    elif was_command:
-                        fetched_query += "\\"
-                        fetched_query += the_char
-                        was_command = False
-                    else:
-                        fetched_query += the_char
-
-        if fetched_stdin != COMMAND__exit and not was_go:
-            fetched_stdin = None
-
-    exit(0)
+if __name__ == "__main__":
+    initialise_from_args()
