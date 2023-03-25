@@ -24,6 +24,7 @@ COMMAND__switch_jaaql_account_to = "\switch jaaql account to "
 COMMAND__connect_to_database = "\connect to database "
 COMMAND__register_jaaql_account_with = "\\register jaaql account with "
 COMMAND__attach_email_account = "\\attach email account "
+COMMAND__quit_short = "\q"
 COMMAND__quit = "\quit"
 
 CONNECT_FOR_CREATEDB = " for createdb"
@@ -52,6 +53,9 @@ class ConnectionInfo:
 
     def get_port(self):
         return int(self.host.split(":")[1])
+
+    def get_host(self):
+        return self.host.split(":")[0]
 
     def get_http_url(self):
         formatted = self.host
@@ -124,8 +128,8 @@ class State:
         res = requests.request(method, conn.get_http_url() + endpoint, json=send_json, headers=conn.oauth_token)
 
         if res.status_code == 401:
-            self._fetch_oauth_token_for_current_connection()
             self.log("Refreshing oauth token")
+            self._fetch_oauth_token_for_current_connection()
             res = requests.request(method, conn.get_http_url() + endpoint, json=send_json, headers=conn.oauth_token)
 
         if res.status_code == 200:
@@ -249,9 +253,9 @@ def format_query_output(state, json_output):
         for col in json_output["columns"]:
             max_length.append(len(col))
 
-    state.log(state, format_output_divider(max_length))
-    state.log(state, format_output_row(json_output["columns"], max_length, [str] * len(json_output["columns"]), [False] * len(max_length)))
-    state.log(state, format_output_divider(max_length))
+    state.log(format_output_divider(max_length))
+    state.log(format_output_row(json_output["columns"], max_length, [str] * len(json_output["columns"]), [False] * len(max_length)))
+    state.log(format_output_divider(max_length))
 
     if len(json_output["rows"]) > ROWS_MAX:
         json_output["rows"] = json_output["rows"][0:ROWS_MAX]
@@ -283,10 +287,10 @@ def handle_login(state, jaaql_url: str = None):
 
 
 def dump_buffer(state, start: str = "\n\n"):
-    return ("%sBuffer was length " % start) + str(len(state.fetched_query.strip())) + " wih contents:\n" + state.fetched_query.strip() + "\n\n"
+    return ("%sBuffer was length " % start) + str(len(state.fetched_query.strip())) + " with contents:\n" + state.fetched_query.strip() + "\n\n"
 
 
-def print_error(state, err, line_offset: int = 0, dump_exc: str = None):
+def print_error(state, err, line_offset: int = 0):
     caller = getframeinfo(stack()[1][0])
     file_message = ""
     if state.file_name is not None:
@@ -299,9 +303,6 @@ def print_error(state, err, line_offset: int = 0, dump_exc: str = None):
         buffer = ""
     print(file_message + err + debug_message + buffer, file=sys.stderr)
     if state.is_script():
-        if dump_exc:
-            print("\n\n" + dump_exc, file=sys.stderr)
-
         exit(1)
 
 
@@ -312,39 +313,31 @@ def wipe_jaaql_box(state: State):
         print_error(state, "Error wiping jaaql box, received status code %d and message:\n\n\t%s" % (res.status_code, res.text))
 
 
-def attach_email_account(state, connection_info: ConnectionInfo):
+def attach_email_account(state, application: str, dispatcher_name: str, credentials_name: str, connection_info: ConnectionInfo):
+    res = state.request_handler(METHOD__post, ENDPOINT__dispatchers, send_json={
+        "application": application,
+        "name": dispatcher_name,
+        "url": connection_info.get_host(),
+        "port": connection_info.get_port(),
+        "username": connection_info.username,
+        "password": connection_info.password
+    }, handle_error=False)
 
-    res = requests.post(attach_jaaql_url + ENDPOINT__dispatchers, headers=attach_auth, json={
-        "name": attach_name,
-        "application": attach_application,
-        "url": attach_url,
-        "port": attach_port,
-        "username": attach_username,
-        "password": attach_password
-    })
-
-    if res.status_code == 200:
-        return
-
-    print_error(state, "Error attaching email account '%s' to dispatcher '%s', received status code %d and message:\n\n\t%s" % (attach_credentials,
-                                                                                                                         attach_name,
-                                                                                                                         res.status_code, res.text))
+    if res.status_code != 200:
+        print_error(state, "Error attaching email account '%s' to dispatcher '%s', received status code %d and message:\n\n\t%s" %
+                    (credentials_name, dispatcher_name, res.status_code, res.text))
 
 
-def register_jaaql_account(state, connection_info: ConnectionInfo):
-    state.request_handler(METHOD__post, ENDPOINT__attach, send_json=send_json)
-
-    res = requests.post(attach_jaaql_url + ENDPOINT__attach, headers=attach_auth, json={
+def register_jaaql_account(state, credentials_name: str, connection_info: ConnectionInfo):
+    res = state.request_handler(METHOD__post, ENDPOINT__attach, send_json={
         "username": connection_info.username,
         "password": connection_info.password,
-        "attach_as": attach_role
-    })
+        "attach_as": connection_info.username
+    }, handle_error=False)
 
-    if res.status_code == 200:
-        return
-
-    print_error(state, "Error attaching user '%s' to role '%s', received status code %d and message:\n\n\t%s" % (attach_username, attach_role,
-                                                                                                                 res.status_code, res.text))
+    if res.status_code != 200:
+        print_error(state, "Error registering jaaql account '%s' with username '%s', received status code %d and message:\n\n\t%s" %
+                    (credentials_name, connection_info.username, res.status_code, res.text))
 
 
 def on_go(state):
@@ -366,7 +359,7 @@ def parse_user_printing_any_errors(state, potential_user, allow_spaces: bool = F
     if not potential_user.startswith("@"):
         print_error(state, "Malformatted user, expected user to start with @")
 
-    return potential_user.split("@")[1]
+    return potential_user.split("@")[1].split(" ")[0]
 
 
 def deal_with_input(state: State):
@@ -397,9 +390,10 @@ def deal_with_input(state: State):
                 if isinstance(fetched_line, EOFMarker):
                     raise EOFError()
         except EOFError:
-            pass
+            break
 
         if fetched_line.startswith(COMMAND__initialiser):
+            fetched_line = fetched_line.strip()  # Ignore the line terminator e.g. \r\n
             if fetched_line == COMMAND__go or fetched_line == COMMAND__go_short:
                 on_go(state)
                 state.fetched_query = ""
@@ -407,8 +401,8 @@ def deal_with_input(state: State):
                 state.fetched_query = ""
             elif fetched_line == COMMAND__print or fetched_line == COMMAND__print_short:
                 dump_buffer(state)
-            elif len(fetched_line) != 0:
-                print_error(state, "Tried to execute the command '" + fetched_line + "' but buffer was non empty." + dump_buffer(state))
+            elif len(state.fetched_query.strip()) != 0:
+                print_error(state, "Tried to execute the command '" + fetched_line + "' but buffer was non empty.")
             elif fetched_line == COMMAND__wipe_dbms:
                 wipe_jaaql_box(state)
             elif fetched_line.startswith(COMMAND__switch_jaaql_account_to):
@@ -417,29 +411,41 @@ def deal_with_input(state: State):
                 state.set_current_connection(get_connection_info(state, connection_name=connection_name))
             elif fetched_line.startswith(COMMAND__connect_to_database):
                 candidate_database = fetched_line.split(COMMAND__connect_to_database)[1].split(" ")[0]
-                if candidate_database.endswith(CONNECT_FOR_CREATEDB):
+                if fetched_line.endswith(CONNECT_FOR_CREATEDB):
                     state.is_transactional = False
+
                 state.database_override = candidate_database.split(CONNECT_FOR_CREATEDB)[0]
             elif fetched_line.startswith(COMMAND__register_jaaql_account_with):
                 candidate_connection_name = fetched_line.split(COMMAND__register_jaaql_account_with)[1]
                 connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
 
-                register_jaaql_account(state, get_connection_info(state, connection_name=connection_name))
+                register_jaaql_account(state, connection_name, get_connection_info(state, connection_name=connection_name))
             elif fetched_line.startswith(COMMAND__attach_email_account):
-                candidate_connection_name = fetched_line.split(COMMAND__register_jaaql_account_with)[1]
-                connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
+                candidate_connection_name = fetched_line.split(COMMAND__attach_email_account)[1]
+                connection_name = parse_user_printing_any_errors(state, candidate_connection_name, allow_spaces=True)
+                if " to " not in candidate_connection_name:
+                    print_error(state, "Expected token 'to' after dispatcher credentials file e.g. " +
+                                COMMAND__attach_email_account + "@dispatcher to app.dispatcher_name")
+                if candidate_connection_name.endswith(" to "):
+                    print_error(state, "Expected fully qualified dispatcher after ' to ' e.g. " +
+                                COMMAND__attach_email_account + "@dispatcher to app.dispatcher_name")
+                dispatcher_fqn = candidate_connection_name.split(" to ")[1]
+                dispatcher_fqn_split = dispatcher_fqn.split(".")
+                if len(dispatcher_fqn_split) != 2:
+                    print_error(state, "Badly formatted dispatcher name. Must be of the format 'app.dispatcher_name'. Received '%s'" % dispatcher_fqn)
 
-                attach_email_account(state, get_connection_info(state, connection_name=connection_name))
-            elif fetched_line == COMMAND__quit:
+                attach_email_account(state, dispatcher_fqn_split[0], dispatcher_fqn_split[1], connection_name,
+                                     get_connection_info(state, connection_name=connection_name))
+            elif fetched_line == COMMAND__quit or fetched_line == COMMAND__quit_short:
                 break
             else:
                 print_error(state, "Unrecognised command '" + fetched_line + "'")
         else:
-            if len(state.fetched_query) != 0 or len(fetched_line) != 0:
+            if len(state.fetched_query.strip()) != 0 or len(fetched_line.strip()) != 0:
                 state.fetched_query += fetched_line  # Do not pre-append things with empty lines
 
     if len(state.fetched_query) != 0:
-        print_error(state, "Attempting to quit with non-empty buffer." + dump_buffer(state) + "Please submit with \\g or clear with \\r")
+        print_error(state, "Attempting to quit with non-empty buffer. Please submit with \\g or clear with \\r")
 
 
 def initialise_from_args():
