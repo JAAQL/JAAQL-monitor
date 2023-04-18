@@ -4,6 +4,7 @@ import requests
 from sys import exit
 from getpass import getpass
 from inspect import getframeinfo, stack
+from datetime import datetime
 import os
 
 ENDPOINT__oauth = "/oauth/token"
@@ -78,6 +79,7 @@ class State:
         self._current_connection = None
         self.fetched_database = None
         self.is_verbose = False
+        self.single_query = False
         self.is_debugging = False
         self.file_name = None
         self.cur_file_line = 0
@@ -120,17 +122,24 @@ class State:
         except requests.exceptions.RequestException:
             print_error(self, "Could not connect to JAAQL running on " + conn.host + "\nPlease make sure that JAAQL is running and accessible")
 
+    def time_delta_ms(self, start_time: datetime, end_time: datetime) -> int:
+        return int(round((end_time - start_time).total_seconds() * 1000))
+
     def request_handler(self, method, endpoint, send_json=None, handle_error: bool = True):
         conn = self.get_current_connection()
         if conn.oauth_token is None:
             self._fetch_oauth_token_for_current_connection()
 
+        start_time = datetime.now()
         res = requests.request(method, conn.get_http_url() + endpoint, json=send_json, headers=conn.oauth_token)
 
         if res.status_code == 401:
             self.log("Refreshing oauth token")
             self._fetch_oauth_token_for_current_connection()
+            start_time = datetime.now()
             res = requests.request(method, conn.get_http_url() + endpoint, json=send_json, headers=conn.oauth_token)
+
+        self.log("Request took " + str(self.time_delta_ms(start_time, datetime.now())) + "ms")
 
         if res.status_code == 200:
             format_query_output(self, res.json())
@@ -224,6 +233,9 @@ def format_query_output(state, json_output):
         return None
     str_num_rows = "(" + str(len(json_output["rows"])) + " " + ("row" if len(json_output["rows"]) == 1 else "rows") + ")"
 
+    if len(json_output["rows"]) > 50:
+        state.log(str_num_rows)
+
     max_length = []
     types = []
     first_pass = True
@@ -257,7 +269,7 @@ def format_query_output(state, json_output):
     state.log(format_output_row(json_output["columns"], max_length, [str] * len(json_output["columns"]), [False] * len(max_length)))
     state.log(format_output_divider(max_length))
 
-    if len(json_output["rows"]) > ROWS_MAX:
+    if len(json_output["rows"]) > ROWS_MAX and not state.file_name:
         json_output["rows"] = json_output["rows"][0:ROWS_MAX]
         json_output["rows"].append(["..." for _ in json_output["columns"]])
 
@@ -445,7 +457,10 @@ def deal_with_input(state: State):
                 state.fetched_query += fetched_line  # Do not pre-append things with empty lines
 
     if len(state.fetched_query) != 0:
-        print_error(state, "Attempting to quit with non-empty buffer. Please submit with \\g or clear with \\r")
+        if state.single_query:
+            on_go(state)
+        else:
+            print_error(state, "Attempting to quit with non-empty buffer. Please submit with \\g or clear with \\r")
 
 
 def initialise_from_args():
@@ -459,6 +474,7 @@ def initialise_from_args():
 
     state.is_verbose = len([arg for arg in args if arg in ['-v', '--verbose']]) != 0
     state.is_debugging = len([arg for arg in args if arg in ['-d', '--debugging']]) != 0
+    state.single_query = len([arg for arg in args if arg in ['-s', '--single-query']]) != 0
 
     if state.is_verbose:
         print_version()
