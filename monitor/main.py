@@ -1,11 +1,18 @@
-from version import print_version
+from monitor.version import print_version
 import sys
 import requests
 from sys import exit
 from getpass import getpass
 from inspect import getframeinfo, stack
 from datetime import datetime
+from base64 import urlsafe_b64encode as b64e, urlsafe_b64decode as b64d
 import os
+
+HEADER__security_bypass = "Authentication-Token-Bypass"
+HEADER__security_bypass_jaaql = "Authentication-Token-Bypass-Jaaql"
+HEADER__security = "Authentication-Token"
+MARKER__bypass = "bypass "
+MARKER__jaaql_bypass = "jaaql_bypass "
 
 ENDPOINT__oauth = "/oauth/token"
 ENDPOINT__submit = "/submit"
@@ -39,18 +46,27 @@ ROWS_MAX = 25
 METHOD__post = "POST"
 METHOD__get = "GET"
 
+ARGS__encoded_config = ['-e', '--encoded-config']
+ARGS__config = ['-c', '--config']
+
+
+class JAAQLMonitorException(Exception):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+
 
 class EOFMarker:
     pass
 
 
 class ConnectionInfo:
-    def __init__(self, host, username, password, database):
+    def __init__(self, host, username, password, database, override_url = None):
         self.host = host
         self.username = username
         self.password = password
         self.database = database
         self.oauth_token = None
+        self.override_url = override_url
 
     def get_port(self):
         return int(self.host.split(":")[1])
@@ -59,6 +75,9 @@ class ConnectionInfo:
         return self.host.split(":")[0]
 
     def get_http_url(self):
+        if self.override_url is not None:
+            return self.override_url
+
         formatted = self.host
         if not formatted.startswith("http"):
             url_input = "https://www." + formatted
@@ -84,6 +103,9 @@ class State:
         self.file_name = None
         self.cur_file_line = 0
         self.file_lines = []
+        self.override_url = None
+
+        self.do_exit = True
 
         self.database_override = None
         self.is_transactional = True
@@ -118,7 +140,7 @@ class State:
                 print_error(self, "Invalid credentials: response code " + str(oauth_res.status_code) + " content: " + oauth_res.text)
                 return None
 
-            conn.oauth_token = {"Authentication-Token": oauth_res.json()}
+            conn.oauth_token = {HEADER__security: oauth_res.json()}
         except requests.exceptions.RequestException:
             print_error(self, "Could not connect to JAAQL running on " + conn.host + "\nPlease make sure that JAAQL is running and accessible")
 
@@ -128,7 +150,12 @@ class State:
     def request_handler(self, method, endpoint, send_json=None, handle_error: bool = True):
         conn = self.get_current_connection()
         if conn.oauth_token is None:
-            self._fetch_oauth_token_for_current_connection()
+            if conn.password.startswith(MARKER__bypass):
+                conn.oauth_token = {HEADER__security_bypass: conn.password.split(MARKER__bypass)[1]}
+            elif conn.password.startswith(MARKER__jaaql_bypass):
+                conn.oauth_token = {HEADER__security_bypass_jaaql: conn.password.split(MARKER__jaaql_bypass)[1]}
+            else:
+                self._fetch_oauth_token_for_current_connection()
 
         start_time = datetime.now()
         res = requests.request(method, conn.get_http_url() + endpoint, json=send_json, headers=conn.oauth_token)
@@ -145,7 +172,10 @@ class State:
             format_query_output(self, res.json())
         else:
             if handle_error:
-                print_error(self, res.text)
+                if endpoint == ENDPOINT__submit:
+                    submit_error(self, res.text)
+                else:
+                    print_error(self, res.text)
 
         return res
 
@@ -184,7 +214,7 @@ def get_connection_info(state: State, connection_name: str = None, file_name: st
 
         state.log("Successfully loaded config")
 
-        ci = ConnectionInfo(host, username, password, database)
+        ci = ConnectionInfo(host, username, password, database, state.override_url)
 
         if connection_name:
             state.connection_info[connection_name] = ci
@@ -201,7 +231,7 @@ def get_connection_info(state: State, connection_name: str = None, file_name: st
 def format_output_row(data, max_length, data_types, breaches):
     builder = ""
     for col, the_length, data_type, did_breach in zip(data, max_length, data_types, breaches):
-        col_str = str(col)
+        col_str = str(col) if col is not None else "null"
         builder += "|"
         spacing = "".join([" "] * max(the_length - len(col_str), 0))
         if did_breach and len(col_str) > the_length:
@@ -295,27 +325,64 @@ def handle_login(state, jaaql_url: str = None):
         username = input("Username: ").strip()
         password = getpass(prompt='Password: ', stream=None)
 
-    return ConnectionInfo(jaaql_url, username, password, None)
+    return ConnectionInfo(jaaql_url, username, password, None, state.override_url)
 
 
 def dump_buffer(state, start: str = "\n\n"):
-    return ("%sBuffer was length " % start) + str(len(state.fetched_query.strip())) + " with contents:\n" + state.fetched_query.strip() + "\n\n"
+    return ("%sBuffer [" % start) + str(len(state.fetched_query.strip())) + "]:\n" + state.fetched_query.strip() + "\n\n"
 
 
-def print_error(state, err, line_offset: int = 0):
+def get_message(state, err, line_offset, buffer, additional_line_message: str = ""):
     caller = getframeinfo(stack()[1][0])
     file_message = ""
     if state.file_name is not None:
-        file_message = "Error on line %d of file '%s':\n\n" % (state.cur_file_line - line_offset, state.file_name)
+        file_message = "Error on " + additional_line_message + "line %d of file '%s':\n\n" % (state.cur_file_line - line_offset, state.file_name)
     debug_message = " [%s:%d]" % (caller.filename, caller.lineno)
     if not state.is_script() or not state.is_debugging:
         debug_message = ""
-    buffer = "\n" + dump_buffer(state, "")
+    buffer = "\n" + buffer
     if not state.is_script():
         buffer = ""
+
     print(file_message + err + debug_message + buffer, file=sys.stderr)
     if state.is_script():
-        exit(1)
+        if state.do_exit:
+            exit(1)
+        else:
+            raise JAAQLMonitorException(file_message + err + debug_message + buffer)
+
+
+def submit_error(state, err, line_offset: int = 0):
+    divided_lines = [line for line in [err_line.strip() for err_line in err.split("\n")]]
+    lines_with_line_number = [line for line in divided_lines if line.startswith("LINE ")]
+    marker_lines = [line for line in [err_line for err_line in err.split("\n")] if line.strip() == "^"]
+
+    print_buffer = dump_buffer(state, "")
+    if len(lines_with_line_number) != 0:
+        line_err_num = int(lines_with_line_number[0].split("LINE ")[1].split(":")[0])
+        state.cur_file_line = line_err_num
+        buffer_lines = state.fetched_query.strip().replace("\r\n", "\n").split("\n")
+        start_line_num = max(0, line_err_num - 10) + 1
+        end_line_num = min(line_err_num, len(buffer_lines)) + 1
+        buffer_lines = buffer_lines[start_line_num - 1:end_line_num - 1]
+
+        marker_line = marker_lines[0]
+        marker_line = marker_line[lines_with_line_number[0].index(":"):]
+        marker_line = "     " + marker_line
+
+        err = "\n".join(err.replace("\r\n", "\n").split("\n")[:-4])
+
+        buffer_lines = [str(start_line_num + idx).rjust(5, '0') + "> " +
+                        (line + "\n" + marker_line + "\n" + err if start_line_num + idx == line_err_num else line)
+                        for idx, line in zip(range(len(buffer_lines)), buffer_lines)]
+
+        err = "\\<b>" + err + "\\</b>\n\n" + "\n".join(buffer_lines)
+        err = err + "\n\n"
+    get_message(state, err, line_offset, print_buffer)
+
+
+def print_error(state, err, line_offset: int = 0):
+    get_message(state, err, line_offset, dump_buffer(state, ""))
 
 
 def wipe_jaaql_box(state: State):
@@ -364,6 +431,8 @@ def on_go(state):
 
     state.request_handler(METHOD__post, ENDPOINT__submit, send_json=send_json)
 
+    state.fetched_query = ""
+
 
 def parse_user_printing_any_errors(state, potential_user, allow_spaces: bool = False):
     if " " in potential_user and not allow_spaces:
@@ -374,7 +443,7 @@ def parse_user_printing_any_errors(state, potential_user, allow_spaces: bool = F
     return potential_user.split("@")[1].split(" ")[0]
 
 
-def deal_with_input(state: State):
+def deal_with_input(state: State, file_content: str = None):
     if len(state.connections) == 0 and state.is_script():
         print_error(state, "Must supply credentials file as argument in script mode")
     if len(state.connections) != 0 and state.connections.get(DEFAULT_CONNECTION):
@@ -385,7 +454,10 @@ def deal_with_input(state: State):
 
     if state.is_script():
         try:
-            state.file_lines = open(state.file_name, "r").readlines()
+            if file_content:
+                state.file_lines = [line + "\n" for line in file_content.replace("\r\n", "\n").split("\n")]
+            else:
+                state.file_lines = open(state.file_name, "r").readlines()
             state.file_lines.append(EOFMarker())  # Ignore warning. We can have multiple types. This is python
         except FileNotFoundError as ex:
             print_error(state, "Could not load file for processing '" + state.file_name + "'")
@@ -408,7 +480,6 @@ def deal_with_input(state: State):
             fetched_line = fetched_line.strip()  # Ignore the line terminator e.g. \r\n
             if fetched_line == COMMAND__go or fetched_line == COMMAND__go_short:
                 on_go(state)
-                state.fetched_query = ""
             elif fetched_line == COMMAND__reset or fetched_line == COMMAND__reset_short:
                 state.fetched_query = ""
             elif fetched_line == COMMAND__print or fetched_line == COMMAND__print_short:
@@ -456,6 +527,10 @@ def deal_with_input(state: State):
             if len(state.fetched_query.strip()) != 0 or len(fetched_line.strip()) != 0:
                 state.fetched_query += fetched_line  # Do not pre-append things with empty lines
 
+            if fetched_line.strip().endswith(COMMAND__go_short):
+                state.fetched_query = state.fetched_query[:-(len(COMMAND__go_short) + 1)]
+                on_go(state)
+
     if len(state.fetched_query) != 0:
         if state.single_query:
             on_go(state)
@@ -463,14 +538,18 @@ def deal_with_input(state: State):
             print_error(state, "Attempting to quit with non-empty buffer. Please submit with \\g or clear with \\r")
 
 
-def initialise_from_args():
+def initialise_from_args(args, file_name: str = None, file_content: str = None, do_exit: bool = True, override_url: str = None):
     state = State()
+    state.do_exit = do_exit
 
-    args = sys.argv[1:]
+    if file_name is None:
+        file_name = [idx for arg, idx in zip(args, range(len(args))) if arg in ['-f', '--file']]
+        if len(file_name) != 0:
+            state.file_name = args[file_name[0] + 1]
+    else:
+        state.file_name = file_name
 
-    file_name = [idx for arg, idx in zip(args, range(len(args))) if arg in ['-f', '--file']]
-    if len(file_name) != 0:
-        state.file_name = args[file_name[0] + 1]
+    state.override_url = override_url
 
     state.is_verbose = len([arg for arg in args if arg in ['-v', '--verbose']]) != 0
     state.is_debugging = len([arg for arg in args if arg in ['-d', '--debugging']]) != 0
@@ -479,30 +558,61 @@ def initialise_from_args():
     if state.is_verbose:
         print_version()
 
-    has_config = len([arg for arg in args if arg in ['-c', '--config']]) != 0
-    if has_config:
-        for arg, arg_idx in zip(args, range(len(args))):
-            if arg not in ['-c', '--config']:
-                continue
-            if arg_idx == len(args) - 1:
-                print_error(state, "The config flag is the last argument. You need to supply a file")
-            configuration_name = args[arg_idx + 1]
-            candidate_file_name = None
-            if arg_idx < len(args) - 2:
-                candidate_file_name = args[arg_idx + 2]
+    for arg, arg_idx in zip(args, range(len(args))):
+        if arg not in ARGS__encoded_config and arg not in ARGS__config:
+            continue
 
-            # The following branch of logic will use the supplied configuration name as the file name and set the configuration name to default
-            if candidate_file_name is None or candidate_file_name.startswith("<") or candidate_file_name.startswith("-"):
-                candidate_file_name = configuration_name
-                configuration_name = DEFAULT_CONNECTION
+        if arg_idx == len(args) - 1:
+            print_error(state, "The config flag is the last argument. You need to supply a file")
 
-            if configuration_name in state.connections:
-                print_error(state, "The configuration with name '" + configuration_name + "' already exists")
+        configuration_name = args[arg_idx + 1]
+        candidate_content_or_file_name = None
+        if arg_idx < len(args) - 2:
+            candidate_content_or_file_name = args[arg_idx + 2]
 
-            state.connections[configuration_name] = candidate_file_name
+        # The following branch of logic will use the supplied configuration name as the file name and set the configuration name to default
+        if candidate_content_or_file_name is None or candidate_content_or_file_name.startswith("<") or candidate_content_or_file_name.startswith("-"):
+            candidate_content_or_file_name = configuration_name
+            configuration_name = DEFAULT_CONNECTION
 
-    deal_with_input(state)
+        if candidate_content_or_file_name in state.connections:
+            print_error(state, "The configuration with name '" + configuration_name + "' already exists")
+
+        state.connections[configuration_name] = candidate_content_or_file_name
+
+        if arg in ARGS__encoded_config:
+            content_split = candidate_content_or_file_name.split(":")
+
+            db = None
+            if len(content_split) == 4:
+                db = b64d(content_split[3]).decode()
+
+            state.connection_info[configuration_name] = ConnectionInfo(b64d(content_split[0]).decode(), b64d(content_split[1]).decode(),
+                                                                       b64d(content_split[2]).decode(), db, state.override_url)
+
+    deal_with_input(state, file_content)
+
+
+def initialise(file_name: str, file_content: str, configs: list[[str, str]], encoded_configs: list[[str, str, str, str, str | None]],
+               override_url: str):
+    args = ["-s"]
+
+    for config in configs:
+        args.append("-c")
+        args.append(config[0])
+        args.append(config[1])
+
+    for encoded_config in encoded_configs:
+        args.append("-e")
+        args.append(encoded_config[0])
+        db_part = ""
+        if encoded_config[4]:
+            db_part = ":" + b64e(encoded_config[4].encode()).decode()
+        args.append(b64e(encoded_config[1].encode()).decode() + ":" + b64e(encoded_config[2].encode()).decode() + ":" +
+                    b64e(encoded_config[3].encode()).decode() + db_part)
+
+    initialise_from_args(args, file_name, file_content, False, override_url)
 
 
 if __name__ == "__main__":
-    initialise_from_args()
+    initialise_from_args(sys.argv[1:])

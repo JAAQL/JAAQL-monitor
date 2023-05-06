@@ -3,3 +3,4 @@ dist
 my_config.txt
 main.spec
 .idea
+__pycache__/**

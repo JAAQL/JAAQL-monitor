@@ -1,1 +1,8 @@
-C:\Users\aaron\Documents\JAAQL-monitor\Scripts\python.exe main.py -c first C:\Users\aaron\Desktop\credentials.txt -c other C:\Users\aaron\Desktop\credentials2.txt -s -v <C:\Users\aaron\Desktop\execute.jaaql
+python update.py
+pyinstaller -F monitor/main.py
+copy dist\main.exe C:\Users\aaron\Dropbox\Programs\FIESTA\jaaql.exe
+
+rmdir build /s /q
+rmdir dist /s /q
+del main.spec
+
