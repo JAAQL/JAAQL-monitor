@@ -48,6 +48,7 @@ METHOD__get = "GET"
 
 ARGS__encoded_config = ['-e', '--encoded-config']
 ARGS__config = ['-c', '--config']
+ARGS__parameter = ['-p', '--parameter']
 
 
 class JAAQLMonitorException(Exception):
@@ -104,6 +105,7 @@ class State:
         self.cur_file_line = 0
         self.file_lines = []
         self.override_url = None
+        self.parameters = {}
 
         self.do_exit = True
 
@@ -420,6 +422,9 @@ def register_jaaql_account(state, credentials_name: str, connection_info: Connec
 
 
 def on_go(state):
+    for parameter, value in state.parameters.items():
+        state.fetched_query = state.fetched_query.replace("{{" + parameter + "}}", value)
+
     send_json = {"query": state.fetched_query}
     cur_conn = state.get_current_connection()
     if cur_conn.database is not None:
@@ -557,6 +562,24 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
 
     if state.is_verbose:
         print_version()
+
+    for arg, arg_idx in zip(args, range(len(args))):
+        if arg not in ARGS__parameter:
+            continue
+
+        if arg_idx == len(args) - 1:
+            print_error(state, "The parameter flag is the last argument. You need to supply a parameter name")
+
+        if arg_idx == len(args) - 2:
+            print_error(state, "The parameter name is the last argument. You need to supply a parameter value")
+
+        parameter_name = args[arg_idx + 1]
+        parameter_value = args[arg_idx + 2]
+
+        if parameter_name in state.parameters:
+            print_error(state, "The parameter '" + parameter_name + "' has already been supplied")
+
+        state.parameters[parameter_name] = parameter_value
 
     for arg, arg_idx in zip(args, range(len(args))):
         if arg not in ARGS__encoded_config and arg not in ARGS__config:

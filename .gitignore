@@ -4,3 +4,4 @@ my_config.txt
 main.spec
 .idea
 __pycache__/**
+*.pyc
