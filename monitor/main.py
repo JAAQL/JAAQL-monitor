@@ -48,6 +48,7 @@ METHOD__get = "GET"
 
 ARGS__encoded_config = ['-e', '--encoded-config']
 ARGS__config = ['-c', '--config']
+ARGS__folder_config = ['-f', '--folder-config']
 ARGS__parameter = ['-p', '--parameter']
 
 
@@ -582,6 +583,29 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
         state.parameters[parameter_name] = parameter_value
 
     for arg, arg_idx in zip(args, range(len(args))):
+        if arg not in ARGS__folder_config:
+            continue
+
+        if arg_idx == len(args) - 1:
+            print_error(state, "The folder config flag is the last argument. You need to supply a file")
+
+        configuration_folder = args[arg_idx + 1]
+
+        for config_file in os.listdir(configuration_folder):
+            full_file_name = os.path.join(configuration_folder, config_file)
+            if config_file.endswith(".email-credentials.txt"):
+                configuration_name = config_file[0:-len(".email.credentials.txt")]
+            elif config_file.endswith(".credentials.txt"):
+                configuration_name = config_file[0:-len(".credentials.txt")]
+            else:
+                raise JAAQLMonitorException("Unrecognised file extension for file " + full_file_name)
+
+            if configuration_name in state.connections:
+                print_error(state, "The configuration with name '" + configuration_name + "' already exists")
+
+            state.connections[configuration_name] = full_file_name
+
+    for arg, arg_idx in zip(args, range(len(args))):
         if arg not in ARGS__encoded_config and arg not in ARGS__config:
             continue
 
@@ -598,7 +622,7 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
             candidate_content_or_file_name = configuration_name
             configuration_name = DEFAULT_CONNECTION
 
-        if candidate_content_or_file_name in state.connections:
+        if configuration_name in state.connections:
             print_error(state, "The configuration with name '" + configuration_name + "' already exists")
 
         state.connections[configuration_name] = candidate_content_or_file_name
