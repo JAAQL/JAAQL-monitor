@@ -46,10 +46,13 @@ ROWS_MAX = 25
 METHOD__post = "POST"
 METHOD__get = "GET"
 
-ARGS__encoded_config = ['-e', '--encoded-config']
+ARGS__encoded_config = ['--encoded-config']
 ARGS__config = ['-c', '--config']
 ARGS__folder_config = ['-f', '--folder-config']
+ARGS__input_file = ['-i', '--input-file']
 ARGS__parameter = ['-p', '--parameter']
+ARGS__single_query = ['-s', '--single-query']
+ARGS__environment = ['-e', '--environment-file']
 
 
 class JAAQLMonitorException(Exception):
@@ -549,7 +552,7 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
     state.do_exit = do_exit
 
     if file_name is None:
-        file_name = [idx for arg, idx in zip(args, range(len(args))) if arg in ['-f', '--file']]
+        file_name = [idx for arg, idx in zip(args, range(len(args))) if arg in ARGS__input_file]
         if len(file_name) != 0:
             state.file_name = args[file_name[0] + 1]
     else:
@@ -559,7 +562,7 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
 
     state.is_verbose = len([arg for arg in args if arg in ['-v', '--verbose']]) != 0
     state.is_debugging = len([arg for arg in args if arg in ['-d', '--debugging']]) != 0
-    state.single_query = len([arg for arg in args if arg in ['-s', '--single-query']]) != 0
+    state.single_query = len([arg for arg in args if arg in ARGS__single_query]) != 0
 
     if state.is_verbose:
         print_version()
@@ -581,6 +584,18 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
             print_error(state, "The parameter '" + parameter_name + "' has already been supplied")
 
         state.parameters[parameter_name] = parameter_value
+
+    for arg, arg_idx in zip(args, range(len(args))):
+        if arg not in ARGS__environment:
+            continue
+
+        if arg_idx == len(args) - 1:
+            print_error(state, "The environment flag is the last argument. You need to supply a file")
+
+        parameter_file = args[arg_idx + 1]
+
+        for line in open(parameter_file, "r").readlines():
+            state.parameters[line.split("=")[0]] = "=".join(line.split("=")[1:])
 
     for arg, arg_idx in zip(args, range(len(args))):
         if arg not in ARGS__folder_config:
@@ -642,15 +657,15 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
 
 def initialise(file_name: str, file_content: str, configs: list[[str, str]], encoded_configs: list[[str, str, str, str, str | None]],
                override_url: str):
-    args = ["-s"]
+    args = [ARGS__single_query[0]]
 
     for config in configs:
-        args.append("-c")
+        args.append(ARGS__config[0])
         args.append(config[0])
         args.append(config[1])
 
     for encoded_config in encoded_configs:
-        args.append("-e")
+        args.append(ARGS__encoded_config[0])
         args.append(encoded_config[0])
         db_part = ""
         if encoded_config[4]:
