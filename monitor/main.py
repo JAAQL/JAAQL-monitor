@@ -19,6 +19,8 @@ ENDPOINT__submit = "/submit"
 ENDPOINT__attach = "/accounts"
 ENDPOINT__dispatchers = "/internal/dispatchers"
 ENDPOINT__wipe = "/internal/clean"
+ENDPOINT__freeze = "/internal/freeze"
+ENDPOINT__defrost = "/internal/defrost"
 
 COMMAND__initialiser = "\\"
 COMMAND__reset_short = "\\r"
@@ -34,6 +36,8 @@ COMMAND__register_jaaql_account_with = "\\register jaaql account with "
 COMMAND__attach_email_account = "\\attach email account "
 COMMAND__quit_short = "\q"
 COMMAND__quit = "\quit"
+COMMAND__freeze_instance = "\\freeze instance"
+COMMAND__defrost_instance = "\defrost instance"
 
 CONNECT_FOR_CREATEDB = " for createdb"
 
@@ -391,6 +395,15 @@ def print_error(state, err, line_offset: int = 0):
     get_message(state, err, line_offset, dump_buffer(state, ""))
 
 
+def freeze_defrost_instance(state: State, freeze: bool):
+    endpoint = ENDPOINT__freeze if freeze else ENDPOINT__defrost
+    verb = "freezing" if freeze else "defrosting"
+    res = state.request_handler(METHOD__post, endpoint, handle_error=False)
+
+    if res.status_code != 200:
+        print_error(state, "Error " + verb + " jaaql box, received status code %d and message:\n\n\t%s" % (res.status_code, res.text))
+
+
 def wipe_jaaql_box(state: State):
     res = state.request_handler(METHOD__post, ENDPOINT__wipe, handle_error=False)
 
@@ -493,6 +506,10 @@ def deal_with_input(state: State, file_content: str = None):
                 state.fetched_query = ""
             elif fetched_line == COMMAND__print or fetched_line == COMMAND__print_short:
                 dump_buffer(state)
+            elif fetched_line == COMMAND__freeze_instance:
+                freeze_defrost_instance(state, freeze=True)
+            elif fetched_line == COMMAND__defrost_instance:
+                freeze_defrost_instance(state, freeze=False)
             elif len(state.fetched_query.strip()) != 0:
                 print_error(state, "Tried to execute the command '" + fetched_line + "' but buffer was non empty.")
             elif fetched_line == COMMAND__wipe_dbms:
