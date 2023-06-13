@@ -626,7 +626,7 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
         for config_file in os.listdir(configuration_folder):
             full_file_name = os.path.join(configuration_folder, config_file)
             if config_file.endswith(".email-credentials.txt"):
-                configuration_name = config_file[0:-len(".email.credentials.txt")]
+                configuration_name = config_file[0:-len(".email-credentials.txt")]
             elif config_file.endswith(".credentials.txt"):
                 configuration_name = config_file[0:-len(".credentials.txt")]
             else:
