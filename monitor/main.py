@@ -1,3 +1,5 @@
+import traceback
+
 from monitor.version import print_version
 import sys
 import requests
@@ -147,7 +149,7 @@ class State:
             })
 
             if oauth_res.status_code != 200:
-                print_error(self, "Invalid credentials: response code " + str(oauth_res.status_code) + " content: " + oauth_res.text)
+                print_error(self, "Invalid credentials: response code " + str(oauth_res.status_code) + " content: " + oauth_res.text + " for username '" + conn.username + "'")
                 return None
 
             conn.oauth_token = {HEADER__security: oauth_res.json()}
@@ -236,6 +238,9 @@ def get_connection_info(state: State, connection_name: str = None, file_name: st
         else:
             print_error(state, "Could not find named credentials file '" + connection_name + "' located at '" + file_name +
                         "', using working directory " + os.getcwd())
+    except Exception as ex:
+        traceback.print_exc()
+        print_error(state, "Could not load the credential file '" + connection_name + "'. Is the file formatted correctly?")
 
 
 def format_output_row(data, max_length, data_types, breaches):
