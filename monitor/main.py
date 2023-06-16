@@ -1,4 +1,5 @@
 import traceback
+from json import JSONDecodeError
 
 from monitor.version import print_version
 import sys
@@ -9,6 +10,7 @@ from inspect import getframeinfo, stack
 from datetime import datetime
 from base64 import urlsafe_b64encode as b64e, urlsafe_b64decode as b64d
 import os
+import json
 
 HEADER__security_bypass = "Authentication-Token-Bypass"
 HEADER__security_bypass_jaaql = "Authentication-Token-Bypass-Jaaql"
@@ -27,19 +29,20 @@ ENDPOINT__defrost = "/internal/defrost"
 COMMAND__initialiser = "\\"
 COMMAND__reset_short = "\\r"
 COMMAND__reset = "\\reset"
-COMMAND__go_short = "\g"
-COMMAND__go = "\go"
-COMMAND__print_short = "\p"
-COMMAND__print = "\print"
-COMMAND__wipe_dbms = "\wipe dbms"
-COMMAND__switch_jaaql_account_to = "\switch jaaql account to "
-COMMAND__connect_to_database = "\connect to database "
+COMMAND__go_short = "\\g"
+COMMAND__go = "\\go"
+COMMAND__print_short = "\\p"
+COMMAND__print = "\\print"
+COMMAND__wipe_dbms = "\\wipe dbms"
+COMMAND__switch_jaaql_account_to = "\\switch jaaql account to "
+COMMAND__connect_to_database = "\\connect to database "
 COMMAND__register_jaaql_account_with = "\\register jaaql account with "
 COMMAND__attach_email_account = "\\attach email account "
-COMMAND__quit_short = "\q"
-COMMAND__quit = "\quit"
+COMMAND__quit_short = "\\q"
+COMMAND__quit = "\\quit"
 COMMAND__freeze_instance = "\\freeze instance"
-COMMAND__defrost_instance = "\defrost instance"
+COMMAND__defrost_instance = "\\defrost instance"
+COMMAND__with_parameters = "WITH PARAMETERS {"
 
 CONNECT_FOR_CREATEDB = " for createdb"
 
@@ -71,7 +74,7 @@ class EOFMarker:
 
 
 class ConnectionInfo:
-    def __init__(self, host, username, password, database, override_url = None):
+    def __init__(self, host, username, password, database, override_url=None):
         self.host = host
         self.username = username
         self.password = password
@@ -116,6 +119,8 @@ class State:
         self.file_lines = []
         self.override_url = None
         self.parameters = {}
+        self.query_parameters = None
+        self.reading_parameters = False
 
         self.do_exit = True
 
@@ -149,7 +154,8 @@ class State:
             })
 
             if oauth_res.status_code != 200:
-                print_error(self, "Invalid credentials: response code " + str(oauth_res.status_code) + " content: " + oauth_res.text + " for username '" + conn.username + "'")
+                print_error(self, "Invalid credentials: response code " + str(oauth_res.status_code) + " content: " + oauth_res.text +
+                            " for username '" + conn.username + "'")
                 return None
 
             conn.oauth_token = {HEADER__security: oauth_res.json()}
@@ -238,7 +244,7 @@ def get_connection_info(state: State, connection_name: str = None, file_name: st
         else:
             print_error(state, "Could not find named credentials file '" + connection_name + "' located at '" + file_name +
                         "', using working directory " + os.getcwd())
-    except Exception as ex:
+    except Exception:
         traceback.print_exc()
         print_error(state, "Could not load the credential file '" + connection_name + "'. Is the file formatted correctly?")
 
@@ -448,6 +454,11 @@ def on_go(state):
         state.fetched_query = state.fetched_query.replace("{{" + parameter + "}}", value)
 
     send_json = {"query": state.fetched_query}
+    if state.query_parameters is not None:
+        try:
+            send_json["parameters"] = json.loads(state.query_parameters)
+        except JSONDecodeError as ex:
+            print_error(state, "You have messed up your parameters: " + str(ex))
     cur_conn = state.get_current_connection()
     if cur_conn.database is not None:
         send_json["database"] = cur_conn.database
@@ -459,6 +470,7 @@ def on_go(state):
     state.request_handler(METHOD__post, ENDPOINT__submit, send_json=send_json)
 
     state.fetched_query = ""
+    state.query_parameters = None
 
 
 def parse_user_printing_any_errors(state, potential_user, allow_spaces: bool = False):
@@ -486,7 +498,7 @@ def deal_with_input(state: State, file_content: str = None):
             else:
                 state.file_lines = open(state.file_name, "r").readlines()
             state.file_lines.append(EOFMarker())  # Ignore warning. We can have multiple types. This is python
-        except FileNotFoundError as ex:
+        except FileNotFoundError:
             print_error(state, "Could not load file for processing '" + state.file_name + "'")
         except Exception as ex:
             print_error(state, "Unhandled exception whilst processing file '" + state.file_name + "' " + str(ex))
@@ -503,7 +515,7 @@ def deal_with_input(state: State, file_content: str = None):
         except EOFError:
             break
 
-        if fetched_line.startswith(COMMAND__initialiser):
+        if fetched_line.startswith(COMMAND__initialiser) or fetched_line.startswith(COMMAND__with_parameters):
             fetched_line = fetched_line.strip()  # Ignore the line terminator e.g. \r\n
             if fetched_line == COMMAND__go or fetched_line == COMMAND__go_short:
                 on_go(state)
@@ -519,6 +531,12 @@ def deal_with_input(state: State, file_content: str = None):
                 print_error(state, "Tried to execute the command '" + fetched_line + "' but buffer was non empty.")
             elif fetched_line == COMMAND__wipe_dbms:
                 wipe_jaaql_box(state)
+            elif fetched_line.startswith(COMMAND__with_parameters):
+                if fetched_line.strip().endswith("}"):
+                    state.query_parameters = fetched_line[len(COMMAND__with_parameters)-1:]
+                else:
+                    state.query_parameters = "{"
+                    state.reading_parameters = True
             elif fetched_line.startswith(COMMAND__switch_jaaql_account_to):
                 candidate_connection_name = fetched_line.split(COMMAND__switch_jaaql_account_to)[1]
                 connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
@@ -555,11 +573,21 @@ def deal_with_input(state: State, file_content: str = None):
             else:
                 print_error(state, "Unrecognised command '" + fetched_line + "'")
         else:
-            if len(state.fetched_query.strip()) != 0 or len(fetched_line.strip()) != 0:
-                state.fetched_query += fetched_line  # Do not pre-append things with empty lines
+            if state.reading_parameters:
+                state.query_parameters += fetched_line
+                if fetched_line.strip().startswith("}"):
+                    state.reading_parameters = False
+            else:
+                if len(state.fetched_query.strip()) != 0 or len(fetched_line.strip()) != 0:
+                    state.fetched_query += fetched_line  # Do not pre-append things with empty lines
 
             if fetched_line.strip().endswith(COMMAND__go_short):
-                state.fetched_query = state.fetched_query[:-(len(COMMAND__go_short) + 1)]
+                if state.reading_parameters:
+                    state.query_parameters = state.query_parameters[:-(len(COMMAND__go_short) + 1)]
+                    state.reading_parameters = False
+                else:
+                    state.fetched_query = state.fetched_query[:-(len(COMMAND__go_short) + 1)]
+
                 on_go(state)
 
     if len(state.fetched_query) != 0:
