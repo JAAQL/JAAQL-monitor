@@ -62,7 +62,7 @@ ARGS__input_file = ['-i', '--input-file']
 ARGS__parameter = ['-p', '--parameter']
 ARGS__single_query = ['-s', '--single-query']
 ARGS__environment = ['-e', '--environment-file']
-ARGS__prevent_unused_parameters = ['-p', '--prevent-unused-parameters']
+ARGS__allow_unused_parameters = ['-a', '--allow-unused-parameters']
 
 
 class JAAQLMonitorException(Exception):
@@ -617,7 +617,7 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
     state.is_verbose = len([arg for arg in args if arg in ['-v', '--verbose']]) != 0
     state.is_debugging = len([arg for arg in args if arg in ['-d', '--debugging']]) != 0
     state.single_query = len([arg for arg in args if arg in ARGS__single_query]) != 0
-    state.prevent_unused_parameters = len([arg for arg in args if arg in ARGS__prevent_unused_parameters]) == 0
+    state.prevent_unused_parameters = len([arg for arg in args if arg in ARGS__allow_unused_parameters]) == 0
 
     if state.is_verbose:
         print_version()
