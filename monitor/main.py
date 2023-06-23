@@ -653,29 +653,6 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
             state.parameters[line.split("=")[0]] = "=".join(line.split("=")[1:])
 
     for arg, arg_idx in zip(args, range(len(args))):
-        if arg not in ARGS__folder_config:
-            continue
-
-        if arg_idx == len(args) - 1:
-            print_error(state, "The folder config flag is the last argument. You need to supply a file")
-
-        configuration_folder = args[arg_idx + 1]
-
-        for config_file in os.listdir(configuration_folder):
-            full_file_name = os.path.join(configuration_folder, config_file)
-            if config_file.endswith(".email-credentials.txt"):
-                configuration_name = config_file[0:-len(".email-credentials.txt")]
-            elif config_file.endswith(".credentials.txt"):
-                configuration_name = config_file[0:-len(".credentials.txt")]
-            else:
-                raise JAAQLMonitorException("Unrecognised file extension for file " + full_file_name)
-
-            if configuration_name in state.connections:
-                print_error(state, "The configuration with name '" + configuration_name + "' already exists")
-
-            state.connections[configuration_name] = full_file_name
-
-    for arg, arg_idx in zip(args, range(len(args))):
         if arg not in ARGS__encoded_config and arg not in ARGS__config:
             continue
 
@@ -707,17 +684,44 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
             state.connection_info[configuration_name] = ConnectionInfo(b64d(content_split[0]).decode(), b64d(content_split[1]).decode(),
                                                                        b64d(content_split[2]).decode(), db, state.override_url)
 
+    for arg, arg_idx in zip(args, range(len(args))):
+        if arg not in ARGS__folder_config:
+            continue
+
+        if arg_idx == len(args) - 1:
+            print_error(state, "The folder config flag is the last argument. You need to supply a file")
+
+        configuration_folder = args[arg_idx + 1]
+
+        for config_file in os.listdir(configuration_folder):
+            full_file_name = os.path.join(configuration_folder, config_file)
+            if config_file.endswith(".email-credentials.txt"):
+                configuration_name = config_file[0:-len(".email-credentials.txt")]
+            elif config_file.endswith(".credentials.txt"):
+                configuration_name = config_file[0:-len(".credentials.txt")]
+            else:
+                raise JAAQLMonitorException("Unrecognised file extension for file " + full_file_name)
+
+            if configuration_name in state.connections:
+                continue  # Allow this
+
+            state.connections[configuration_name] = full_file_name
+
     deal_with_input(state, file_content)
 
 
 def initialise(file_name: str, file_content: str, configs: list[[str, str]], encoded_configs: list[[str, str, str, str, str | None]],
-               override_url: str):
+               override_url: str, folder_name: str = None):
     args = [ARGS__single_query[0]]
 
     for config in configs:
         args.append(ARGS__config[0])
         args.append(config[0])
         args.append(config[1])
+
+    if folder_name is not None:
+        args.append(ARGS__folder_config[0])
+        args.append(folder_name)
 
     for encoded_config in encoded_configs:
         args.append(ARGS__encoded_config[0])
