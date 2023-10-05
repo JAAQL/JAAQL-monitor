@@ -18,6 +18,7 @@ HEADER__security = "Authentication-Token"
 MARKER__bypass = "bypass "
 MARKER__jaaql_bypass = "jaaql_bypass "
 
+ENDPOINT__prepare = "/prepare"
 ENDPOINT__oauth = "/oauth/token"
 ENDPOINT__submit = "/submit"
 ENDPOINT__attach = "/accounts"
@@ -167,7 +168,7 @@ class State:
     def time_delta_ms(self, start_time: datetime, end_time: datetime) -> int:
         return int(round((end_time - start_time).total_seconds() * 1000))
 
-    def request_handler(self, method, endpoint, send_json=None, handle_error: bool = True):
+    def request_handler(self, method, endpoint, send_json=None, handle_error: bool = True, format_as_query_output: bool = True):
         conn = self.get_current_connection()
         if conn.oauth_token is None:
             if conn.password.startswith(MARKER__bypass):
@@ -188,8 +189,10 @@ class State:
 
         self.log("Request took " + str(self.time_delta_ms(start_time, datetime.now())) + "ms")
 
-        if res.status_code == 200:
+        if res.status_code == 200 and format_as_query_output:
             format_query_output(self, res.json())
+        elif res.status_code == 200:
+            print(json.dumps(res.json()))
         else:
             if handle_error:
                 if endpoint == ENDPOINT__submit:
@@ -486,6 +489,12 @@ def parse_user_printing_any_errors(state, potential_user, allow_spaces: bool = F
     return potential_user.split("@")[1].split(" ")[0]
 
 
+def deal_with_prepare(state: State, file_content: str = None):
+    if len(state.connections) != 0 and state.connections.get(DEFAULT_CONNECTION):
+        state.set_current_connection(get_connection_info(state, DEFAULT_CONNECTION))  # Preloads the default connection
+
+    state.request_handler(METHOD__post, ENDPOINT__prepare, send_json=file_content, format_as_query_output=False)
+
 def deal_with_input(state: State, file_content: str = None):
     if len(state.connections) == 0 and state.is_script():
         print_error(state, "Must supply credentials file as argument in script mode")
@@ -601,7 +610,7 @@ def deal_with_input(state: State, file_content: str = None):
             print_error(state, "Attempting to quit with non-empty buffer. Please submit with \\g or clear with \\r")
 
 
-def initialise_from_args(args, file_name: str = None, file_content: str = None, do_exit: bool = True, override_url: str = None):
+def initialise_from_args(args, file_name: str = None, file_content: str = None, do_exit: bool = True, override_url: str = None, do_prepare: bool = False):
     state = State()
     state.do_exit = do_exit
 
@@ -707,11 +716,14 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
 
             state.connections[configuration_name] = full_file_name
 
-    deal_with_input(state, file_content)
+    if do_prepare:
+        deal_with_prepare(state, file_content)
+    else:
+        deal_with_input(state, file_content)
 
 
 def initialise(file_name: str, file_content: str, configs: list[[str, str]], encoded_configs: list[[str, str, str, str, str | None]],
-               override_url: str, folder_name: str = None):
+               override_url: str, folder_name: str = None, do_prepare: bool = False):
     args = [ARGS__single_query[0]]
 
     for config in configs:
@@ -732,7 +744,7 @@ def initialise(file_name: str, file_content: str, configs: list[[str, str]], enc
         args.append(b64e(encoded_config[1].encode()).decode() + ":" + b64e(encoded_config[2].encode()).decode() + ":" +
                     b64e(encoded_config[3].encode()).decode() + db_part)
 
-    initialise_from_args(args, file_name, file_content, False, override_url)
+    initialise_from_args(args, file_name, file_content, False, override_url, do_prepare=do_prepare)
 
 
 if __name__ == "__main__":

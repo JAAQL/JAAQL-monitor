@@ -20,7 +20,7 @@ Then it will accept input over standard input. Scripts can be separated via \p a
 # Building
 To build you will need to have a python environment (3.8) setup locally. Building will produce a windows executable (the latest executable is in the repo if you require it). If you are on linux you can create an executable as well but you need to install python to do that so you might as well just use the python script. To build please run the commands below
 
-    pyinstaller -F main.py
+    ./build.bat
 
 # Running locally
 Please install requirements.txt. Using python 3.11
