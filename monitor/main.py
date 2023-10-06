@@ -162,9 +162,6 @@ class State:
 
     def _fetch_oauth_token_for_current_connection(self):
         conn = self.get_current_connection()
-        f = open("C:\\Users\\aaron.tasker\\Desktop\\log.txt", "a")
-        f.write("Getting oauth token\n" + json.dumps(conn.to_dict()) + "\n" + json.dumps({key: conn.to_dict() for key, conn in self.connection_info.items()}) + "\n")
-        f.close()
         try:
             oauth_res = requests.post(conn.get_http_url() + ENDPOINT__oauth, json={
                 "username": conn.username,
@@ -177,9 +174,6 @@ class State:
                 return None
 
             conn.oauth_token = {HEADER__security: oauth_res.json()}
-            f = open("C:\\Users\\aaron.tasker\\Desktop\\log.txt", "a")
-            f.write("Got oauth token\n")
-            f.close()
         except requests.exceptions.RequestException:
             print_error(self, "Could not connect to JAAQL running on " + conn.host + "\nPlease make sure that JAAQL is running and accessible")
 
@@ -210,7 +204,7 @@ class State:
         if res.status_code == 200 and format_as_query_output:
             format_query_output(self, res.json())
         elif res.status_code == 200:
-            print(json.dumps(res.json()))
+            print(json.dumps(res.json(), indent=4))
         else:
             if handle_error:
                 if endpoint == ENDPOINT__submit:
