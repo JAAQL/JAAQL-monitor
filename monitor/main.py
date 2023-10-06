@@ -84,6 +84,16 @@ class ConnectionInfo:
         self.oauth_token = None
         self.override_url = override_url
 
+    def to_dict(self):
+        return {
+            'host': self.host,
+            'username': self.username,
+            'password': self.password,
+            'database': self.database,
+            'oauth_token': self.oauth_token,
+            'override_url': self.override_url
+        }
+
     def get_port(self):
         return int(self.host.split(":")[1])
 
@@ -130,8 +140,10 @@ class State:
         self.database_override = None
         self.is_transactional = True
 
-    def set_current_connection(self, connection: ConnectionInfo):
-        self._current_connection = connection
+    def set_current_connection(self, connection, name=DEFAULT_CONNECTION):
+        self._current_connection = name
+        if connection not in self.connection_info:
+            self.connection_info[name] = connection
         self.database_override = None
         self.is_transactional = True
 
@@ -142,7 +154,7 @@ class State:
         if self._current_connection is None:
             print_error(self, "There is no selected connection. Please supply a default connection or switch to a connection first")
 
-        return self._current_connection
+        return self.connection_info[self._current_connection]
 
     def log(self, msg):
         if self.is_verbose:
@@ -150,6 +162,9 @@ class State:
 
     def _fetch_oauth_token_for_current_connection(self):
         conn = self.get_current_connection()
+        f = open("C:\\Users\\aaron.tasker\\Desktop\\log.txt", "a")
+        f.write("Getting oauth token\n" + json.dumps(conn.to_dict()) + "\n" + json.dumps({key: conn.to_dict() for key, conn in self.connection_info.items()}) + "\n")
+        f.close()
         try:
             oauth_res = requests.post(conn.get_http_url() + ENDPOINT__oauth, json={
                 "username": conn.username,
@@ -162,6 +177,9 @@ class State:
                 return None
 
             conn.oauth_token = {HEADER__security: oauth_res.json()}
+            f = open("C:\\Users\\aaron.tasker\\Desktop\\log.txt", "a")
+            f.write("Got oauth token\n")
+            f.close()
         except requests.exceptions.RequestException:
             print_error(self, "Could not connect to JAAQL running on " + conn.host + "\nPlease make sure that JAAQL is running and accessible")
 
@@ -491,15 +509,22 @@ def parse_user_printing_any_errors(state, potential_user, allow_spaces: bool = F
 
 def deal_with_prepare(state: State, file_content: str = None):
     if len(state.connections) != 0 and state.connections.get(DEFAULT_CONNECTION):
-        state.set_current_connection(get_connection_info(state, DEFAULT_CONNECTION))  # Preloads the default connection
+        state.set_current_connection(get_connection_info(state, DEFAULT_CONNECTION), DEFAULT_CONNECTION)  # Preloads the default connection
 
-    state.request_handler(METHOD__post, ENDPOINT__prepare, send_json=file_content, format_as_query_output=False)
+    cur_conn = state.get_current_connection()
+
+    send_json = {
+        "queries": file_content,
+        "database": cur_conn.database if cur_conn.database is not None else (state.database_override if state.database_override is not None else None)
+    }
+
+    state.request_handler(METHOD__post, ENDPOINT__prepare, send_json=send_json, format_as_query_output=False)
 
 def deal_with_input(state: State, file_content: str = None):
     if len(state.connections) == 0 and state.is_script():
         print_error(state, "Must supply credentials file as argument in script mode")
     if len(state.connections) != 0 and state.connections.get(DEFAULT_CONNECTION):
-        state.set_current_connection(get_connection_info(state, DEFAULT_CONNECTION))  # Preloads the default connection
+        state.set_current_connection(get_connection_info(state, DEFAULT_CONNECTION), DEFAULT_CONNECTION)  # Preloads the default connection
     elif not state.is_script():
         print(state, "Type jaaql url or \"file [config_file_location]\"")
         state.set_current_connection(handle_login(state, input("LOGIN>").strip()))
@@ -553,7 +578,7 @@ def deal_with_input(state: State, file_content: str = None):
             elif fetched_line.startswith(COMMAND__switch_jaaql_account_to):
                 candidate_connection_name = fetched_line.split(COMMAND__switch_jaaql_account_to)[1]
                 connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
-                state.set_current_connection(get_connection_info(state, connection_name=connection_name))
+                state.set_current_connection(get_connection_info(state, connection_name=connection_name), connection_name)
             elif fetched_line.startswith(COMMAND__connect_to_database):
                 candidate_database = fetched_line.split(COMMAND__connect_to_database)[1].split(" ")[0]
                 if fetched_line.endswith(CONNECT_FOR_CREATEDB):
