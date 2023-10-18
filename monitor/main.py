@@ -202,7 +202,14 @@ class State:
         self.log("Request took " + str(self.time_delta_ms(start_time, datetime.now())) + "ms")
 
         if res.status_code == 200 and format_as_query_output:
-            format_query_output(self, res.json())
+            was_explain = False
+            if "query" in send_json:
+                was_explain = len([line.strip().startswith("EXPLAIN ANALYZE") for line in split_by_lines(send_json["query"])]) != 0
+
+            if was_explain:
+                self.log(res.json()["rows"][0][0])
+            else:
+                format_query_output(self, res.json())
         elif res.status_code == 200:
             print(json.dumps(res.json(), indent=4))
         else:
