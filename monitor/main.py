@@ -180,7 +180,8 @@ class State:
     def time_delta_ms(self, start_time: datetime, end_time: datetime) -> int:
         return int(round((end_time - start_time).total_seconds() * 1000))
 
-    def request_handler(self, method, endpoint, send_json=None, handle_error: bool = True, format_as_query_output: bool = True):
+    def request_handler(self, method, endpoint, send_json=None, handle_error: bool = True, format_as_query_output: bool = True,
+                        compress_output_unless: list = None):
         conn = self.get_current_connection()
         if conn.oauth_token is None:
             if conn.password.startswith(MARKER__bypass):
@@ -216,7 +217,11 @@ class State:
             else:
                 format_query_output(self, res.json())
         elif res.status_code == 200:
-            print(json.dumps(res.json(), indent=4))
+            if compress_output_unless is not None and isinstance(res.json(), list):
+                perhaps_expanded = ["\n    ".join(json.dumps(itm, indent=4 if any([itm.get(val) is not None for val in compress_output_unless]) else None).split("\n")) for itm in res.json()]
+                print("[\n   " + ",\n    ".join(perhaps_expanded) + "\n]")
+            else:
+                print(json.dumps(res.json(), indent=4))
         else:
             if handle_error:
                 if endpoint == ENDPOINT__submit:
@@ -524,7 +529,8 @@ def deal_with_prepare(state: State, file_content: str = None):
         "database": cur_conn.database if cur_conn.database is not None else (state.database_override if state.database_override is not None else None)
     }
 
-    state.request_handler(METHOD__post, ENDPOINT__prepare, send_json=send_json, format_as_query_output=False)
+    state.request_handler(METHOD__post, ENDPOINT__prepare, send_json=send_json, format_as_query_output=False, compress_output_unless=["exception"])
+
 
 def deal_with_input(state: State, file_content: str = None):
     if len(state.connections) == 0 and state.is_script():
