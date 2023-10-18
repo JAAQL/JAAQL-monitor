@@ -219,7 +219,7 @@ class State:
         elif res.status_code == 200:
             if compress_output_unless is not None and isinstance(res.json(), list):
                 perhaps_expanded = ["\n    ".join(json.dumps(itm, indent=4 if any([itm.get(val) is not None for val in compress_output_unless]) else None).split("\n")) for itm in res.json()]
-                print("[\n   " + ",\n    ".join(perhaps_expanded) + "\n]")
+                print("[\n    " + ",\n    ".join(perhaps_expanded) + "\n]")
             else:
                 print(json.dumps(res.json(), indent=4))
         else:
