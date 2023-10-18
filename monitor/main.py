@@ -204,10 +204,14 @@ class State:
         if res.status_code == 200 and format_as_query_output:
             was_explain = False
             if "query" in send_json:
-                was_explain = len([line.strip().startswith("EXPLAIN ANALYZE") for line in split_by_lines(send_json["query"])]) != 0
+                was_explain = len([line for line in split_by_lines(send_json["query"]) if line.strip().startswith("EXPLAIN ANALYZE")]) != 0
 
             if was_explain:
-                self.log(res.json()["rows"][0][0])
+                rows = res.json()["rows"]
+                self.log("")
+                self.log("")
+                for row in rows:
+                    self.log(row[0])
             else:
                 format_query_output(self, res.json())
         elif res.status_code == 200:
