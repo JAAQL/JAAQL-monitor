@@ -408,7 +408,11 @@ def submit_error(state, err, line_offset: int = 0):
         marker_line = marker_line[lines_with_line_number[0].index(":"):]
         marker_line = "     " + marker_line
 
-        err = "\n".join(err.replace("\r\n", "\n").split("\n")[:-4])
+        new_err = "\n".join(err.replace("\r\n", "\n").split("\n")[:-4])
+        if len(new_err) == 0:
+            err = err.split("\n")[0]
+        else:
+            err = new_err
 
         buffer_lines = [str(start_line_num + idx).rjust(5, '0') + "> " +
                         (line + "\n" + marker_line + "\n" + err if start_line_num + idx == line_err_num else line)
