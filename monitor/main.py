@@ -15,6 +15,7 @@ import json
 HEADER__security_bypass = "Authentication-Token-Bypass"
 HEADER__security_bypass_jaaql = "Authentication-Token-Bypass-Jaaql"
 HEADER__security = "Authentication-Token"
+HEADER__security_specify_user = "Authentication-Token-Bypass-With-User"
 MARKER__bypass = "bypass "
 MARKER__jaaql_bypass = "jaaql_bypass "
 
@@ -62,6 +63,7 @@ ARGS__folder_config = ['-f', '--folder-config']
 ARGS__input_file = ['-i', '--input-file']
 ARGS__parameter = ['-p', '--parameter']
 ARGS__single_query = ['-s', '--single-query']
+ARGS__skip_auth = ['-a', '--skip-auth']
 ARGS__environment = ['-e', '--environment-file']
 ARGS__allow_unused_parameters = ['-a', '--allow-unused-parameters']
 
@@ -124,6 +126,7 @@ class State:
         self._current_connection = None
         self.fetched_database = None
         self.is_verbose = False
+        self.skip_auth = False
         self.single_query = False
         self.is_debugging = False
         self.file_name = None
@@ -162,20 +165,24 @@ class State:
 
     def _fetch_oauth_token_for_current_connection(self):
         conn = self.get_current_connection()
-        try:
-            oauth_res = requests.post(conn.get_http_url() + ENDPOINT__oauth, json={
-                "username": conn.username,
-                "password": conn.password
-            })
 
-            if oauth_res.status_code != 200:
-                print_error(self, "Invalid credentials: response code " + str(oauth_res.status_code) + " content: " + oauth_res.text +
-                            " for username '" + conn.username + "'")
-                return None
+        if self.skip_auth:
+            conn.oauth_token = {HEADER__security_specify_user: conn.username}
+        else:
+            try:
+                oauth_res = requests.post(conn.get_http_url() + ENDPOINT__oauth, json={
+                    "username": conn.username,
+                    "password": conn.password
+                })
 
-            conn.oauth_token = {HEADER__security: oauth_res.json()}
-        except requests.exceptions.RequestException:
-            print_error(self, "Could not connect to JAAQL running on " + conn.host + "\nPlease make sure that JAAQL is running and accessible")
+                if oauth_res.status_code != 200:
+                    print_error(self, "Invalid credentials: response code " + str(oauth_res.status_code) + " content: " + oauth_res.text +
+                                " for username '" + conn.username + "'")
+                    return None
+
+                conn.oauth_token = {HEADER__security: oauth_res.json()}
+            except requests.exceptions.RequestException:
+                print_error(self, "Could not connect to JAAQL running on " + conn.host + "\nPlease make sure that JAAQL is running and accessible")
 
     def time_delta_ms(self, start_time: datetime, end_time: datetime) -> int:
         return int(round((end_time - start_time).total_seconds() * 1000))
@@ -665,6 +672,7 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
     state.override_url = override_url
 
     state.is_verbose = len([arg for arg in args if arg in ['-v', '--verbose']]) != 0
+    state.skip_auth = len([arg for arg in args if arg in ARGS__skip_auth]) != 0
     state.is_debugging = len([arg for arg in args if arg in ['-d', '--debugging']]) != 0
     state.single_query = len([arg for arg in args if arg in ARGS__single_query]) != 0
     state.prevent_unused_parameters = len([arg for arg in args if arg in ARGS__allow_unused_parameters]) == 0
