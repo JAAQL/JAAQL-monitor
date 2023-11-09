@@ -10,6 +10,7 @@ from inspect import getframeinfo, stack
 from datetime import datetime
 from base64 import urlsafe_b64encode as b64e, urlsafe_b64decode as b64d
 import os
+from os.path import dirname
 import json
 
 HEADER__security_bypass = "Authentication-Token-Bypass"
@@ -30,6 +31,7 @@ ENDPOINT__defrost = "/internal/defrost"
 
 COMMAND__initialiser = "\\"
 COMMAND__reset_short = "\\r"
+COMMAND__import = "\\import"
 COMMAND__reset = "\\reset"
 COMMAND__go_short = "\\g"
 COMMAND__go = "\\go"
@@ -124,6 +126,7 @@ class State:
         self.connections = {}
         self.connection_info = {}
         self._current_connection = None
+        self.file_stack = []
         self.fetched_database = None
         self.is_verbose = False
         self.skip_auth = False
@@ -568,11 +571,19 @@ def deal_with_input(state: State, file_content: str = None):
         fetched_line = None
         try:
             if len(state.file_lines) != 0:
-                fetched_line = state.file_lines[0]
-                state.cur_file_line += 1
-                state.file_lines = state.file_lines[1:]
-                if isinstance(fetched_line, EOFMarker):
-                    raise EOFError()
+                while fetched_line is None:
+                    fetched_line = state.file_lines[0]
+                    state.cur_file_line += 1
+                    state.file_lines = state.file_lines[1:]
+                    if isinstance(fetched_line, EOFMarker):
+                        if len(state.file_stack) == 0:
+                            raise EOFError()
+                        else:
+                            last_ret = state.file_stack[-1]
+                            state.cur_file_line = last_ret["cur_file_line"]
+                            state.file_lines = last_ret["file_lines"]
+                            state.file_stack = state.file_stack[:-1]
+                            fetched_line = None
         except EOFError:
             break
 
@@ -588,6 +599,16 @@ def deal_with_input(state: State, file_content: str = None):
                 freeze_defrost_instance(state, freeze=True)
             elif fetched_line == COMMAND__defrost_instance:
                 freeze_defrost_instance(state, freeze=False)
+            elif fetched_line.startswith(COMMAND__import):
+                state.file_stack.append({
+                    "cur_file_line": state.cur_file_line,
+                    "file_lines": state.file_lines
+                })
+                import_file = " ".join(fetched_line.split(COMMAND__import)[1:]).strip()
+                file_path = os.path.join(dirname(state.file_name), import_file)
+                state.file_name = file_path
+                state.file_lines = open(state.file_name, "r").readlines()
+                state.file_lines.append(EOFMarker())
             elif len(state.fetched_query.strip()) != 0:
                 print_error(state, "Tried to execute the command '" + fetched_line + "' but buffer was non empty.")
             elif fetched_line == COMMAND__wipe_dbms:
