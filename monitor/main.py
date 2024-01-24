@@ -24,6 +24,7 @@ ENDPOINT__prepare = "/prepare"
 ENDPOINT__oauth = "/oauth/token"
 ENDPOINT__submit = "/submit"
 ENDPOINT__attach = "/accounts"
+ENDPOINT__attach_batch = "/accounts/batch"
 ENDPOINT__dispatchers = "/internal/dispatchers"
 ENDPOINT__wipe = "/internal/clean"
 ENDPOINT__freeze = "/internal/freeze"
@@ -41,6 +42,7 @@ COMMAND__wipe_dbms = "\\wipe dbms"
 COMMAND__switch_jaaql_account_to = "\\switch jaaql account to "
 COMMAND__connect_to_database = "\\connect to database "
 COMMAND__register_jaaql_account_with = "\\register jaaql account with "
+COMMAND__clone_jaaql_account = "\\clone jaaql account "
 COMMAND__attach_email_account = "\\attach email account "
 COMMAND__quit_short = "\\q"
 COMMAND__quit = "\\quit"
@@ -485,12 +487,19 @@ def attach_email_account(state, application: str, dispatcher_name: str, credenti
                     (credentials_name, dispatcher_name, res.status_code, res.text))
 
 
-def register_jaaql_account(state, credentials_name: str, connection_info: ConnectionInfo):
-    res = state.request_handler(METHOD__post, ENDPOINT__attach, send_json={
+def register_jaaql_account(state, credentials_name: str, connection_info: ConnectionInfo, clone_users: list[str] = None):
+    send_json = {
         "username": connection_info.username,
         "password": connection_info.password,
         "attach_as": connection_info.username
-    }, handle_error=False)
+    }
+    endpoint = ENDPOINT__attach
+    if clone_users is not None:
+        send_json["attach_as"] = clone_users
+        send_json["username"] = clone_users
+        endpoint = ENDPOINT__attach_batch
+
+    res = state.request_handler(METHOD__post, endpoint, send_json=send_json, handle_error=False)
 
     if res.status_code != 200:
         print_error(state, "Error registering jaaql account '%s' with username '%s', received status code %d and message:\n\n\t%s" %
@@ -629,6 +638,13 @@ def deal_with_input(state: State, file_content: str = None):
                     state.is_transactional = False
 
                 state.database_override = candidate_database.split(CONNECT_FOR_CREATEDB)[0]
+            elif fetched_line.startswith(COMMAND__clone_jaaql_account):
+                candidate_connection_name = fetched_line.split(COMMAND__clone_jaaql_account)[1].split(" ")[0]
+                connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
+                users = " ".join(fetched_line.split(COMMAND__clone_jaaql_account)[1].split(" ")[1:]).split("for ")[1]
+                users = [user.strip() for user in users.split(",")]
+
+                register_jaaql_account(state, connection_name, get_connection_info(state, connection_name=connection_name), clone_users=users)
             elif fetched_line.startswith(COMMAND__register_jaaql_account_with):
                 candidate_connection_name = fetched_line.split(COMMAND__register_jaaql_account_with)[1]
                 connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
