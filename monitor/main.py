@@ -495,8 +495,11 @@ def register_jaaql_account(state, credentials_name: str, connection_info: Connec
     }
     endpoint = ENDPOINT__attach
     if clone_users is not None:
-        send_json["attach_as"] = clone_users
-        send_json["username"] = clone_users
+        send_json = [{
+            "username": user,
+            "password": connection_info.password,
+            "attach_as": user
+        } for user in clone_users]
         endpoint = ENDPOINT__attach_batch
 
     res = state.request_handler(METHOD__post, endpoint, send_json=send_json, handle_error=False)
