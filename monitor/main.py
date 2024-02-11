@@ -495,11 +495,11 @@ def register_jaaql_account(state, credentials_name: str, connection_info: Connec
     }
     endpoint = ENDPOINT__attach
     if clone_users is not None:
-        send_json = [{
+        send_json = {"accounts": [{
             "username": user,
             "password": connection_info.password,
             "attach_as": user
-        } for user in clone_users]
+        } for user in clone_users]}
         endpoint = ENDPOINT__attach_batch
 
     res = state.request_handler(METHOD__post, endpoint, send_json=send_json, handle_error=False)
@@ -644,7 +644,7 @@ def deal_with_input(state: State, file_content: str = None):
             elif fetched_line.startswith(COMMAND__clone_jaaql_account):
                 candidate_connection_name = fetched_line.split(COMMAND__clone_jaaql_account)[1].split(" ")[0]
                 connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
-                users = " ".join(fetched_line.split(COMMAND__clone_jaaql_account)[1].split(" ")[1:]).split("for ")[1]
+                users = " ".join(fetched_line.split(COMMAND__clone_jaaql_account)[1].split(" ")[2:])
                 users = [user.strip() for user in users.split(",")]
 
                 register_jaaql_account(state, connection_name, get_connection_info(state, connection_name=connection_name), clone_users=users)
