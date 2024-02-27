@@ -27,7 +27,7 @@ ENDPOINT__attach = "/accounts"
 ENDPOINT__attach_batch = "/accounts/batch"
 ENDPOINT__dispatchers = "/internal/dispatchers"
 ENDPOINT__wipe = "/internal/clean"
-ENDPOINT__set_page_headers = "/internal/set-page-headers"
+ENDPOINT__set_web_config = "/internal/set-web-config"
 ENDPOINT__freeze = "/internal/freeze"
 ENDPOINT__defrost = "/internal/defrost"
 
@@ -49,7 +49,7 @@ COMMAND__quit_short = "\\q"
 COMMAND__quit = "\\quit"
 COMMAND__freeze_instance = "\\freeze instance"
 COMMAND__defrost_instance = "\\defrost instance"
-COMMAND__set_page_headers = "\\set page headers"
+COMMAND__set_web_config = "\\set web config"
 COMMAND__with_parameters = "WITH PARAMETERS {"
 
 CONNECT_FOR_CREATEDB = " for createdb"
@@ -474,11 +474,11 @@ def wipe_jaaql_box(state: State):
         print_error(state, "Error wiping jaaql box, received status code %d and message:\n\n\t%s" % (res.status_code, res.text))
 
 
-def set_page_headers(state: State):
-    res = state.request_handler(METHOD__post, ENDPOINT__set_page_headers, handle_error=False)
+def set_web_config(state: State):
+    res = state.request_handler(METHOD__post, ENDPOINT__set_web_config, handle_error=False)
 
     if res.status_code != 200:
-        print_error(state, "Error setting page headers, received status code %d and message:\n\n\t%s" % (res.status_code, res.text))
+        print_error(state, "Error setting web config, received status code %d and message:\n\n\t%s" % (res.status_code, res.text))
 
 
 def attach_email_account(state, application: str, dispatcher_name: str, credentials_name: str, connection_info: ConnectionInfo):
@@ -634,8 +634,8 @@ def deal_with_input(state: State, file_content: str = None):
                 print_error(state, "Tried to execute the command '" + fetched_line + "' but buffer was non empty.")
             elif fetched_line == COMMAND__wipe_dbms:
                 wipe_jaaql_box(state)
-            elif fetched_line == COMMAND__set_page_headers:
-                set_page_headers(state)
+            elif fetched_line == COMMAND__set_web_config:
+                set_web_config(state)
             elif fetched_line.startswith(COMMAND__with_parameters):
                 if fetched_line.strip().endswith("}"):
                     state.query_parameters = fetched_line[len(COMMAND__with_parameters)-1:]
