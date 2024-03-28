@@ -21,6 +21,7 @@ MARKER__bypass = "bypass "
 MARKER__jaaql_bypass = "jaaql_bypass "
 
 ENDPOINT__prepare = "/prepare"
+ENDPOINT__cron = "/cron"
 ENDPOINT__oauth = "/oauth/token"
 ENDPOINT__submit = "/submit"
 ENDPOINT__attach = "/accounts"
@@ -39,6 +40,7 @@ COMMAND__go_short = "\\g"
 COMMAND__go = "\\go"
 COMMAND__print_short = "\\p"
 COMMAND__print = "\\print"
+COMMAND__cron = "\\cron"
 COMMAND__wipe_dbms = "\\wipe dbms"
 COMMAND__switch_jaaql_account_to = "\\switch jaaql account to "
 COMMAND__connect_to_database = "\\connect to database "
@@ -567,6 +569,14 @@ def deal_with_prepare(state: State, file_content: str = None):
     state.request_handler(METHOD__post, ENDPOINT__prepare, send_json=send_json, format_as_query_output=False, compress_output_unless=["exception"])
 
 
+def fire_cron(state: State, cron_application, cron_command, cron_args):
+    cron_args = json.loads(cron_args)
+    state.request_handler(METHOD__post, ENDPOINT__cron, send_json={**{
+        "application": cron_application,
+        "command": cron_command,
+    }, **cron_args})
+
+
 def deal_with_input(state: State, file_content: str = None):
     if len(state.connections) == 0 and state.is_script():
         print_error(state, "Must supply credentials file as argument in script mode")
@@ -588,8 +598,14 @@ def deal_with_input(state: State, file_content: str = None):
         except Exception as ex:
             print_error(state, "Unhandled exception whilst processing file '" + state.file_name + "' " + str(ex))
 
+    in_cron = False
+    cron_application = None
+    cron_command = None
+    cron_args = ""
+
     while True:
         fetched_line = None
+
         try:
             if len(state.file_lines) != 0:
                 while fetched_line is None:
@@ -616,6 +632,14 @@ def deal_with_input(state: State, file_content: str = None):
                 state.fetched_query = ""
             elif fetched_line == COMMAND__print or fetched_line == COMMAND__print_short:
                 dump_buffer(state)
+            elif len(state.fetched_query.strip()) != 0:
+                print_error(state, "Tried to execute the command '" + fetched_line + "' but buffer was non empty.")
+            elif fetched_line.startswith(COMMAND__cron):
+                cron_command = fetched_line.split(COMMAND__cron + " ")[1].strip()
+                cron_application = cron_command.split(" ")[0]
+                cron_command = " ".join(cron_command.split(" ")[1])
+                cron_args = ""
+                in_cron = True
             elif fetched_line == COMMAND__freeze_instance:
                 freeze_defrost_instance(state, freeze=True)
             elif fetched_line == COMMAND__defrost_instance:
@@ -630,8 +654,6 @@ def deal_with_input(state: State, file_content: str = None):
                 state.file_name = file_path
                 state.file_lines = open(state.file_name, "r").readlines()
                 state.file_lines.append(EOFMarker())
-            elif len(state.fetched_query.strip()) != 0:
-                print_error(state, "Tried to execute the command '" + fetched_line + "' but buffer was non empty.")
             elif fetched_line == COMMAND__wipe_dbms:
                 wipe_jaaql_box(state)
             elif fetched_line == COMMAND__set_web_config:
@@ -684,6 +706,11 @@ def deal_with_input(state: State, file_content: str = None):
                 break
             else:
                 print_error(state, "Unrecognised command '" + fetched_line + "'")
+        elif in_cron:
+            cron_args += fetched_line.strip()
+            if cron_args.endswith("}"):
+                in_cron = False
+                fire_cron(state, cron_application, cron_command, cron_args)
         else:
             if state.reading_parameters:
                 state.query_parameters += fetched_line
