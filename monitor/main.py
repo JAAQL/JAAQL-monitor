@@ -632,14 +632,6 @@ def deal_with_input(state: State, file_content: str = None):
                 state.fetched_query = ""
             elif fetched_line == COMMAND__print or fetched_line == COMMAND__print_short:
                 dump_buffer(state)
-            elif len(state.fetched_query.strip()) != 0:
-                print_error(state, "Tried to execute the command '" + fetched_line + "' but buffer was non empty.")
-            elif fetched_line.startswith(COMMAND__cron):
-                cron_command = fetched_line.split(COMMAND__cron + " ")[1].strip()
-                cron_application = cron_command.split(" ")[0]
-                cron_command = " ".join(cron_command.split(" ")[1])
-                cron_args = ""
-                in_cron = True
             elif fetched_line == COMMAND__freeze_instance:
                 freeze_defrost_instance(state, freeze=True)
             elif fetched_line == COMMAND__defrost_instance:
@@ -654,6 +646,14 @@ def deal_with_input(state: State, file_content: str = None):
                 state.file_name = file_path
                 state.file_lines = open(state.file_name, "r").readlines()
                 state.file_lines.append(EOFMarker())
+            elif len(state.fetched_query.strip()) != 0:
+                print_error(state, "Tried to execute the command '" + fetched_line + "' but buffer was non empty.")
+            elif fetched_line.startswith(COMMAND__cron):
+                cron_command = fetched_line.split(COMMAND__cron + " ")[1].strip()
+                cron_application = cron_command.split(" ")[0]
+                cron_command = " ".join(cron_command.split(" ")[1])
+                cron_args = ""
+                in_cron = True
             elif fetched_line == COMMAND__wipe_dbms:
                 wipe_jaaql_box(state)
             elif fetched_line == COMMAND__set_web_config:
