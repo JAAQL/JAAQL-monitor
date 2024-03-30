@@ -176,7 +176,10 @@ class State:
         conn = self.get_current_connection()
 
         if self.skip_auth:
-            conn.oauth_token = {HEADER__security_specify_user: conn.username}
+            conn.oauth_token = {
+                HEADER__security_bypass: os.environ.get("JAAQL__SUPER_BYPASS_KEY", "00000-00000"),
+                HEADER__security_specify_user: conn.username
+            }
         else:
             try:
                 oauth_res = requests.post(conn.get_http_url() + ENDPOINT__oauth, json={
@@ -570,11 +573,15 @@ def deal_with_prepare(state: State, file_content: str = None):
 
 
 def fire_cron(state: State, cron_application, cron_command, cron_args):
-    cron_args = json.loads(cron_args)
-    state.request_handler(METHOD__post, ENDPOINT__cron, send_json={**{
-        "application": cron_application,
-        "command": cron_command,
-    }, **cron_args})
+    try:
+        cron_args = json.loads(cron_args)
+        state.request_handler(METHOD__post, ENDPOINT__cron, send_json={**{
+            "application": cron_application,
+            "command": cron_command,
+        }, **cron_args})
+    except JSONDecodeError as ex:
+        print(cron_args, file=sys.stderr)
+        raise ex
 
 
 def deal_with_input(state: State, file_content: str = None):
@@ -651,7 +658,7 @@ def deal_with_input(state: State, file_content: str = None):
             elif fetched_line.startswith(COMMAND__cron):
                 cron_command = fetched_line.split(COMMAND__cron + " ")[1].strip()
                 cron_application = cron_command.split(" ")[0]
-                cron_command = " ".join(cron_command.split(" ")[1])
+                cron_command = " ".join(cron_command.split(" ")[1:])
                 cron_args = ""
                 in_cron = True
             elif fetched_line == COMMAND__wipe_dbms:
