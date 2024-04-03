@@ -584,6 +584,23 @@ def fire_cron(state: State, cron_application, cron_command, cron_args):
         raise ex
 
 
+def read_file_lines_with_fallback(file_path, first_encoding='windows-1252', default_encoding='utf-8'):
+    try:
+        # Attempt to open with the first specified encoding
+        with open(file_path, 'r', encoding=first_encoding) as f:
+            return f.readlines()
+    except UnicodeDecodeError:
+        try:
+            with open(file_path, 'r', encoding=default_encoding) as f:
+                return f.readlines()
+        except UnicodeDecodeError as e:
+            raise e
+        except Exception as e:
+            raise e
+    except Exception as e:
+        raise e
+
+
 def deal_with_input(state: State, file_content: str = None):
     if len(state.connections) == 0 and state.is_script():
         print_error(state, "Must supply credentials file as argument in script mode")
@@ -598,7 +615,7 @@ def deal_with_input(state: State, file_content: str = None):
             if file_content:
                 state.file_lines = [line + "\n" for line in file_content.replace("\r\n", "\n").split("\n")]
             else:
-                state.file_lines = open(state.file_name, "r").readlines()
+                state.file_lines = read_file_lines_with_fallback(state.file_name)
             state.file_lines.append(EOFMarker())  # Ignore warning. We can have multiple types. This is python
         except FileNotFoundError:
             print_error(state, "Could not load file for processing '" + state.file_name + "'")
