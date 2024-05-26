@@ -55,6 +55,7 @@ COMMAND__set_web_config = "\\set web config"
 COMMAND__with_parameters = "WITH PARAMETERS {"
 
 CONNECT_FOR_CREATEDB = " for createdb"
+CONNECT_FOR_EXTENSION_CONFIGURATION = " for extension configuration"
 
 DEFAULT_CONNECTION = "default"
 DEFAULT_EMAIL_ACCOUNT = "default"
@@ -694,10 +695,10 @@ def deal_with_input(state: State, file_content: str = None):
                 state.set_current_connection(get_connection_info(state, connection_name=connection_name), connection_name)
             elif fetched_line.startswith(COMMAND__connect_to_database):
                 candidate_database = fetched_line.split(COMMAND__connect_to_database)[1].split(" ")[0]
-                if fetched_line.endswith(CONNECT_FOR_CREATEDB):
+                if fetched_line.endswith(CONNECT_FOR_CREATEDB) or fetched_line.startswith(CONNECT_FOR_EXTENSION_CONFIGURATION):
                     state.is_transactional = False
 
-                state.database_override = candidate_database.split(CONNECT_FOR_CREATEDB)[0]
+                state.database_override = candidate_database.split(CONNECT_FOR_CREATEDB)[0].split(CONNECT_FOR_EXTENSION_CONFIGURATION)[0]
             elif fetched_line.startswith(COMMAND__clone_jaaql_account):
                 candidate_connection_name = fetched_line.split(COMMAND__clone_jaaql_account)[1].split(" ")[0]
                 connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
