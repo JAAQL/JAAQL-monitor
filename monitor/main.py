@@ -201,7 +201,7 @@ class State:
         return int(round((end_time - start_time).total_seconds() * 1000))
 
     def request_handler(self, method, endpoint, send_json=None, handle_error: bool = True, format_as_query_output: bool = True,
-                        compress_output_unless: list = None):
+                        compress_output_unless: list = None, line_offset: int = 0):
         conn = self.get_current_connection()
         if conn.oauth_token is None:
             if conn.password.startswith(MARKER__bypass):
@@ -245,7 +245,7 @@ class State:
         else:
             if handle_error:
                 if endpoint == ENDPOINT__submit:
-                    submit_error(self, res.text)
+                    submit_error(self, res.text, line_offset=line_offset)
                 else:
                     print_error(self, res.text)
 
@@ -411,13 +411,20 @@ def get_message(state, err, line_offset, buffer, additional_line_message: str = 
     caller = getframeinfo(stack()[1][0])
     file_message = ""
     if state.file_name is not None:
-        file_message = "Error on " + additional_line_message + "line %d of file '%s':\n\n" % (state.cur_file_line - line_offset, state.file_name)
+        file_message = "Error on " + additional_line_message + "line %d of file '%s':\n" % (state.cur_file_line - line_offset, state.file_name)
     debug_message = " [%s:%d]" % (caller.filename, caller.lineno)
     if not state.is_script() or not state.is_debugging:
         debug_message = ""
     buffer = "\n" + buffer
     if not state.is_script():
         buffer = ""
+
+    try:
+        json_err = json.loads(err)
+        if json_err.get("message") is not None:
+            err = json_err["message"] + "\n\n" + err
+    except JSONDecodeError:
+        pass
 
     print(file_message + err + debug_message + buffer, file=sys.stderr)
     if state.is_script():
@@ -544,7 +551,7 @@ def on_go(state):
     if not state.prevent_unused_parameters:
         send_json["prevent_unused_parameters"] = False
 
-    state.request_handler(METHOD__post, ENDPOINT__submit, send_json=send_json)
+    state.request_handler(METHOD__post, ENDPOINT__submit, send_json=send_json, line_offset=len(state.fetched_query.splitlines()) - 1)
 
     state.fetched_query = ""
     state.query_parameters = None
@@ -644,6 +651,7 @@ def deal_with_input(state: State, file_content: str = None):
                             last_ret = state.file_stack[-1]
                             state.cur_file_line = last_ret["cur_file_line"]
                             state.file_lines = last_ret["file_lines"]
+                            state.file_name = last_ret["cur_file_name"]
                             state.file_stack = state.file_stack[:-1]
                             fetched_line = None
         except EOFError:
@@ -664,7 +672,8 @@ def deal_with_input(state: State, file_content: str = None):
             elif fetched_line.startswith(COMMAND__import):
                 state.file_stack.append({
                     "cur_file_line": state.cur_file_line,
-                    "file_lines": state.file_lines
+                    "file_lines": state.file_lines,
+                    "cur_file_name": state.file_name
                 })
                 import_file = " ".join(fetched_line.split(COMMAND__import)[1:]).strip()
                 file_path = os.path.join(dirname(state.file_name), import_file)
