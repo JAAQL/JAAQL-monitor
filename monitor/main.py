@@ -1,7 +1,7 @@
 import traceback
 from json import JSONDecodeError
 
-from monitor.version import print_version
+from monitor.version import print_version, VERSION
 import sys
 import requests
 from sys import exit
@@ -411,7 +411,7 @@ def get_message(state, err, line_offset, buffer, additional_line_message: str = 
     caller = getframeinfo(stack()[1][0])
     file_message = ""
     if state.file_name is not None:
-        file_message = "Error on " + additional_line_message + "line %d of file '%s':\n" % (state.cur_file_line - line_offset, state.file_name)
+        file_message = "Using JAAQL " + str(VERSION) + "\nError on " + additional_line_message + "line %d of file '%s':\n" % (state.cur_file_line - line_offset, state.file_name)
     debug_message = " [%s:%d]" % (caller.filename, caller.lineno)
     if not state.is_script() or not state.is_debugging:
         debug_message = ""
@@ -592,17 +592,24 @@ def fire_cron(state: State, cron_application, cron_command, cron_args):
         raise ex
 
 
-def read_file_lines_with_fallback(file_path, first_encoding='windows-1252', default_encoding='utf-8'):
+def read_file_lines_with_fallback(file_path, first_encoding='utf-8-sig', second_encoding='windows-1252', default_encoding='utf-8'):
     try:
         # Attempt to open with the first specified encoding
         with open(file_path, 'r', encoding=first_encoding) as f:
             return f.readlines()
     except UnicodeDecodeError:
         try:
-            with open(file_path, 'r', encoding=default_encoding) as f:
+            with open(file_path, 'r', encoding=second_encoding) as f:
                 return f.readlines()
         except UnicodeDecodeError as e:
-            raise e
+            try:
+                # Attempt to open with the first specified encoding
+                with open(file_path, 'r', encoding=default_encoding) as f:
+                    return f.readlines()
+            except UnicodeDecodeError:
+                raise e
+            except Exception as e:
+                raise e
         except Exception as e:
             raise e
     except Exception as e:
