@@ -75,6 +75,7 @@ ARGS__single_query = ['-s', '--single-query']
 ARGS__skip_auth = ['-a', '--skip-auth']
 ARGS__environment = ['-e', '--environment-file']
 ARGS__allow_unused_parameters = ['-a', '--allow-unused-parameters']
+ARGS__clone_as_attach = ['--clone-as-attach']
 
 
 class JAAQLMonitorException(Exception):
@@ -147,6 +148,7 @@ class State:
         self.query_parameters = None
         self.reading_parameters = False
         self.prevent_unused_parameters = True
+        self.clone_as_attach = False
 
         self.do_exit = True
 
@@ -259,7 +261,7 @@ def split_by_lines(split_str, gap=1):
     return [s for s in split_str if len(s.strip()) != 0]
 
 
-def get_connection_info(state: State, connection_name: str = None, file_name: str = None):
+def get_connection_info(state: State, connection_name: str = None, file_name: str = None, override_username: str = None):
     if connection_name and connection_name in state.connection_info:
         return state.connection_info[connection_name]
     elif connection_name and connection_name in state.connections:
@@ -275,6 +277,8 @@ def get_connection_info(state: State, connection_name: str = None, file_name: st
         config = split_by_lines(config)
         host = config[0].strip()
         username = config[1].strip()
+        if override_username is not None:
+            username = override_username
         password = config[2].strip()
         database = None
         if len(config) > 3:
@@ -519,7 +523,7 @@ def register_jaaql_account(state, credentials_name: str, connection_info: Connec
     if clone_users is not None:
         send_json = {"accounts": [{
             "username": user,
-            "password": connection_info.password,
+            "password": None if state.clone_as_attach else connection_info.password,
             "attach_as": user
         } for user in clone_users]}
         endpoint = ENDPOINT__attach_batch
@@ -723,10 +727,15 @@ def deal_with_input(state: State, file_content: str = None):
 
                 register_jaaql_account(state, connection_name, get_connection_info(state, connection_name=connection_name), clone_users=users)
             elif fetched_line.startswith(COMMAND__register_jaaql_account_with):
-                candidate_connection_name = fetched_line.split(COMMAND__register_jaaql_account_with)[1]
+                candidate_connection_name = fetched_line.split(COMMAND__register_jaaql_account_with)[1].split(" ")[0]
+                overriding = fetched_line.split(" overriding username as ")
+                if len(overriding) != 1:
+                    overriding = overriding[1]
+                else:
+                    overriding = None
                 connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
 
-                register_jaaql_account(state, connection_name, get_connection_info(state, connection_name=connection_name))
+                register_jaaql_account(state, connection_name, get_connection_info(state, connection_name=connection_name, override_username=overriding))
             elif fetched_line.startswith(COMMAND__attach_email_account):
                 candidate_connection_name = fetched_line.split(COMMAND__attach_email_account)[1]
                 connection_name = parse_user_printing_any_errors(state, candidate_connection_name, allow_spaces=True)
@@ -795,6 +804,7 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
     state.is_debugging = len([arg for arg in args if arg in ['-d', '--debugging']]) != 0
     state.single_query = len([arg for arg in args if arg in ARGS__single_query]) != 0
     state.prevent_unused_parameters = len([arg for arg in args if arg in ARGS__allow_unused_parameters]) == 0
+    state.clone_as_attach = len([arg for arg in args if arg in ARGS__clone_as_attach]) == 0
 
     if state.is_verbose:
         print_version()
