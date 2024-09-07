@@ -804,7 +804,7 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
     state.is_debugging = len([arg for arg in args if arg in ['-d', '--debugging']]) != 0
     state.single_query = len([arg for arg in args if arg in ARGS__single_query]) != 0
     state.prevent_unused_parameters = len([arg for arg in args if arg in ARGS__allow_unused_parameters]) == 0
-    state.clone_as_attach = len([arg for arg in args if arg in ARGS__clone_as_attach]) == 0
+    state.clone_as_attach = len([arg for arg in args if arg in ARGS__clone_as_attach]) == 1
 
     if state.is_verbose:
         print_version()
