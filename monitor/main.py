@@ -880,19 +880,20 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
 
         configuration_folder = args[arg_idx + 1]
 
-        for config_file in os.listdir(configuration_folder):
-            full_file_name = os.path.join(configuration_folder, config_file)
-            if config_file.endswith(".email-credentials.txt"):
-                configuration_name = config_file[0:-len(".email-credentials.txt")]
-            elif config_file.endswith(".credentials.txt"):
-                configuration_name = config_file[0:-len(".credentials.txt")]
-            else:
-                raise JAAQLMonitorException("Unrecognised file extension for file " + full_file_name)
+        for sub_folder in configuration_folder.split(";"):
+            for config_file in os.listdir(sub_folder):
+                full_file_name = os.path.join(sub_folder, config_file)
+                if config_file.endswith(".email-credentials.txt"):
+                    configuration_name = config_file[0:-len(".email-credentials.txt")]
+                elif config_file.endswith(".credentials.txt"):
+                    configuration_name = config_file[0:-len(".credentials.txt")]
+                else:
+                    raise JAAQLMonitorException("Unrecognised file extension for file " + full_file_name)
 
-            if configuration_name in state.connections:
-                continue  # Allow this
+                if configuration_name in state.connections:
+                    continue  # Allow this
 
-            state.connections[configuration_name] = full_file_name
+                state.connections[configuration_name] = full_file_name
 
     if do_prepare:
         deal_with_prepare(state, file_content)
