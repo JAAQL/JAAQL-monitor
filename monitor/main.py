@@ -888,7 +888,8 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
                 elif config_file.endswith(".credentials.txt"):
                     configuration_name = config_file[0:-len(".credentials.txt")]
                 else:
-                    raise JAAQLMonitorException("Unrecognised file extension for file " + full_file_name)
+                     # raise JAAQLMonitorException("Unrecognised file extension for file " + full_file_name)
+                    continue  # Just ignore, it's not a problem
 
                 if configuration_name in state.connections:
                     continue  # Allow this
