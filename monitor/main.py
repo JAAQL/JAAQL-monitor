@@ -11,7 +11,10 @@ from datetime import datetime
 from base64 import urlsafe_b64encode as b64e, urlsafe_b64decode as b64d
 import os
 from os.path import dirname
+import shutil
 import json
+import platform
+import subprocess
 
 HEADER__security_bypass = "Authentication-Token-Bypass"
 HEADER__security_bypass_jaaql = "Authentication-Token-Bypass-Jaaql"
@@ -45,6 +48,7 @@ COMMAND__wipe_dbms = "\\wipe dbms"
 COMMAND__switch_jaaql_account_to = "\\switch jaaql account to "
 COMMAND__connect_to_database = "\\connect to database "
 COMMAND__register_jaaql_account_with = "\\register jaaql account with "
+COMMAND__psql = "\\psql "
 COMMAND__clone_jaaql_account = "\\clone jaaql account "
 COMMAND__attach_email_account = "\\attach email account "
 COMMAND__quit_short = "\\q"
@@ -76,6 +80,7 @@ ARGS__skip_auth = ['-a', '--skip-auth']
 ARGS__environment = ['-e', '--environment-file']
 ARGS__allow_unused_parameters = ['-a', '--allow-unused-parameters']
 ARGS__clone_as_attach = ['--clone-as-attach']
+ARGS__slurp_in_location = ['--jaaql-slurp-in-location']
 
 
 class JAAQLMonitorException(Exception):
@@ -149,6 +154,7 @@ class State:
         self.reading_parameters = False
         self.prevent_unused_parameters = True
         self.clone_as_attach = False
+        self.slurp_in_location = None
 
         self.do_exit = True
 
@@ -199,7 +205,8 @@ class State:
             except requests.exceptions.RequestException:
                 print_error(self, "Could not connect to JAAQL running on " + conn.host + "\nPlease make sure that JAAQL is running and accessible")
 
-    def time_delta_ms(self, start_time: datetime, end_time: datetime) -> int:
+    @staticmethod
+    def time_delta_ms(start_time: datetime, end_time: datetime) -> int:
         return int(round((end_time - start_time).total_seconds() * 1000))
 
     def request_handler(self, method, endpoint, send_json=None, handle_error: bool = True, format_as_query_output: bool = True,
@@ -222,7 +229,7 @@ class State:
             start_time = datetime.now()
             res = requests.request(method, conn.get_http_url() + endpoint, json=send_json, headers=conn.oauth_token)
 
-        self.log("Request took " + str(self.time_delta_ms(start_time, datetime.now())) + "ms")
+        self.log("Request took " + str(State.time_delta_ms(start_time, datetime.now())) + "ms")
 
         if res.status_code == 200 and format_as_query_output:
             was_explain = False
@@ -620,6 +627,46 @@ def read_file_lines_with_fallback(file_path, first_encoding='utf-8-sig', second_
         raise e
 
 
+def construct_docker_command(container_name, sql_file_path_inside_container, supplied_database):
+    """
+    Constructs the Docker command based on the operating system.
+    """
+    docker_exec = ["docker", "exec"]
+
+    # If not Windows, prepend 'sudo'
+    if not platform.system().lower() == 'windows':
+        docker_exec = ["sudo"] + docker_exec
+
+    # Full Docker command to execute psql
+    command = docker_exec + [
+        container_name,
+        "psql",
+        "-U", "postgres",
+        "-d", supplied_database,
+        "-f", sql_file_path_inside_container
+    ]
+
+    return command
+
+
+def execute_command(state, command):
+    """
+    Executes the given command and returns the result.
+    """
+    try:
+        result = subprocess.run(
+            command,
+            shell=False,
+            check=False,  # We will handle errors manually
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True  # Decode to string
+        )
+        return result
+    except Exception as e:
+        print_error(state, f"Error executing command slurp in command: {e}")
+
+
 def deal_with_input(state: State, file_content: str = None):
     if len(state.connections) == 0 and state.is_script():
         print_error(state, "Must supply credentials file as argument in script mode")
@@ -752,6 +799,28 @@ def deal_with_input(state: State, file_content: str = None):
 
                 attach_email_account(state, dispatcher_fqn_split[0], dispatcher_fqn_split[1], connection_name,
                                      get_connection_info(state, connection_name=connection_name))
+            elif fetched_line.startswith(COMMAND__psql):
+                the_user = parse_user_printing_any_errors(state, fetched_line.split(COMMAND__psql)[1].split(" ")[0])
+                the_file = fetched_line.split(COMMAND__psql)[1].split(" ")[1]
+
+                if state.slurp_in_location is None:
+                    print_error(state, "No 'slurp in location' provided. Use arg '%s'" % ARGS__slurp_in_location[0])
+
+                connection = get_connection_info(state, connection_name=the_user)
+                the_database = connection.database
+
+                file_path = os.path.join(dirname(state.file_name), the_file)
+                insert_prior = f'SET SESSION AUTHORIZATION "{connection.username}";'
+                with open(file_path, 'r', encoding='utf-8-sig') as f_src, open(os.path.join(state.slurp_in_location, the_file), 'w', encoding='utf-8') as f_dest:
+                    f_dest.write(insert_prior + '\n')
+                    shutil.copyfileobj(f_src, f_dest)
+
+                command = construct_docker_command("jaaql_container", "/slurp-in/" + the_file, the_database)
+                result = execute_command(state, command)
+
+                if result.returncode != 0 or len(result.stderr) != 0:
+                    print_error(state, f"Error executing: {the_file}\n\n{result.stderr}")
+
             elif fetched_line == COMMAND__quit or fetched_line == COMMAND__quit_short:
                 break
             else:
@@ -810,6 +879,11 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
         print_version()
 
     for arg, arg_idx in zip(args, range(len(args))):
+        if arg in ARGS__slurp_in_location:
+            if arg_idx == len(args) - 1:
+                print_error(state, "The slurp in arg is the last argument. You need to supply a directory")
+            state.slurp_in_location = args[arg_idx + 1]
+
         if arg not in ARGS__parameter:
             continue
 
