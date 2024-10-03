@@ -57,6 +57,8 @@ COMMAND__freeze_instance = "\\freeze instance"
 COMMAND__defrost_instance = "\\defrost instance"
 COMMAND__set_web_config = "\\set web config"
 COMMAND__with_parameters = "WITH PARAMETERS {"
+COMMAND__with_user = "WITH USER"
+COMMAND__and_user = " AND USER "
 
 CONNECT_FOR_CREATEDB = " for createdb"
 CONNECT_FOR_EXTENSION_CONFIGURATION = " for extension configuration"
@@ -173,7 +175,10 @@ class State:
 
     def get_current_connection(self) -> ConnectionInfo:
         if self._current_connection is None:
-            print_error(self, "There is no selected connection. Please supply a default connection or switch to a connection first")
+            if DEFAULT_CONNECTION in self.connections:
+                self._current_connection = DEFAULT_CONNECTION
+            else:
+                print_error(self, "There is no selected connection. Please supply a default connection or switch to a connection first")
 
         return self.connection_info[self._current_connection]
 
@@ -731,7 +736,7 @@ def deal_with_input(state: State, file_content: str = None):
         except EOFError:
             break
 
-        if fetched_line.startswith(COMMAND__initialiser) or fetched_line.startswith(COMMAND__with_parameters):
+        if fetched_line.startswith(COMMAND__initialiser) or fetched_line.upper().startswith(COMMAND__with_parameters) or fetched_line.upper().startswith(COMMAND__with_user):
             fetched_line = fetched_line.strip()  # Ignore the line terminator e.g. \r\n
             if fetched_line == COMMAND__go or fetched_line == COMMAND__go_short:
                 on_go(state)
@@ -766,6 +771,11 @@ def deal_with_input(state: State, file_content: str = None):
                 wipe_jaaql_box(state)
             elif fetched_line == COMMAND__set_web_config:
                 set_web_config(state)
+            elif fetched_line.upper().startswith(COMMAND__with_user):
+                overriding_user = fetched_line.upper().split(COMMAND__with_user)[1].strip().lower()
+                if "\"" in overriding_user or "'" in overriding_user:
+                    print_error(state, "Please do not quote the user!")
+                state.get_current_connection().username = overriding_user
             elif fetched_line.startswith(COMMAND__with_parameters):
                 if fetched_line.strip().endswith("}"):
                     state.query_parameters = fetched_line[len(COMMAND__with_parameters)-1:]
@@ -829,6 +839,7 @@ def deal_with_input(state: State, file_content: str = None):
                 insert_prior = f'SET SESSION AUTHORIZATION "{connection.username}";'
                 with open(file_path, 'r', encoding='utf-8-sig') as f_src, open(os.path.join(state.slurp_in_location, the_file), 'w', encoding='utf-8') as f_dest:
                     f_dest.write(insert_prior + '\n')
+                    f_dest.write("SET client_min_messages=WARNING;\n")
                     shutil.copyfileobj(f_src, f_dest)
 
                 command = construct_docker_command("jaaql_container", "/slurp-in/" + the_file, the_database)
@@ -848,9 +859,19 @@ def deal_with_input(state: State, file_content: str = None):
                 fire_cron(state, cron_application, cron_command, cron_args)
         else:
             if state.reading_parameters:
-                state.query_parameters += fetched_line
                 if fetched_line.strip().startswith("}"):
                     state.reading_parameters = False
+
+                    if len(fetched_line.split("} ")) > 1 and (fetched_line.split("} ")[1].upper().startswith(COMMAND__and_user) or fetched_line.split("} ")[1].upper().startswith(COMMAND__with_user)):
+                        delimiter = COMMAND__and_user if COMMAND__and_user in fetched_line.upper() else COMMAND__with_user
+                        overriding_user = fetched_line.upper().split(delimiter)[1].strip().lower()
+                        if "\"" in overriding_user or "'" in overriding_user:
+                            print_error(state, "Please do not quote the user!")
+                        state.get_current_connection().username = overriding_user
+
+                    state.query_parameters += "}"
+                else:
+                    state.query_parameters += fetched_line
             else:
                 if len(state.fetched_query.strip()) != 0 or len(fetched_line.strip()) != 0:
                     state.fetched_query += fetched_line  # Do not pre-append things with empty lines
