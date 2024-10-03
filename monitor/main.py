@@ -667,6 +667,22 @@ def execute_command(state, command):
         print_error(state, f"Error executing command slurp in command: {e}")
 
 
+def read_utf8_lines(filename):
+    with open(filename, 'rb') as file:
+        # Read the first few bytes to check for BOM
+        first_bytes = file.read(3)
+
+        # Check for UTF-8-SIG (BOM)
+        if first_bytes.startswith(b'\xef\xbb\xbf'):
+            # Reopen with 'utf-8-sig' to properly handle BOM
+            file = open(filename, encoding='utf-8-sig')
+        else:
+            # Reopen with 'utf-8' assuming no BOM
+            file = open(filename, encoding='utf-8')
+
+        return file.readlines()
+
+
 def deal_with_input(state: State, file_content: str = None):
     if len(state.connections) == 0 and state.is_script():
         print_error(state, "Must supply credentials file as argument in script mode")
@@ -736,7 +752,7 @@ def deal_with_input(state: State, file_content: str = None):
                 import_file = " ".join(fetched_line.split(COMMAND__import)[1:]).strip()
                 file_path = os.path.join(dirname(state.file_name), import_file)
                 state.file_name = file_path
-                state.file_lines = open(state.file_name, "r").readlines()
+                state.file_lines = read_utf8_lines(state.file_name)
                 state.file_lines.append(EOFMarker())
             elif len(state.fetched_query.strip()) != 0:
                 print_error(state, "Tried to execute the command '" + fetched_line + "' but buffer was non empty.")
