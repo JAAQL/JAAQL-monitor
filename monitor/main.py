@@ -837,12 +837,12 @@ def deal_with_input(state: State, file_content: str = None):
 
                 file_path = os.path.join(dirname(state.file_name), the_file)
                 insert_prior = f'SET SESSION AUTHORIZATION "{connection.username}";'
-                with open(file_path, 'r', encoding='utf-8-sig') as f_src, open(os.path.join(state.slurp_in_location, the_file), 'w', encoding='utf-8') as f_dest:
+                with open(file_path, 'r', encoding='utf-8-sig') as f_src, open(os.path.join(state.slurp_in_location, os.path.basename(the_file)), 'w', encoding='utf-8') as f_dest:
                     f_dest.write(insert_prior + '\n')
                     f_dest.write("SET client_min_messages=WARNING;\n")
                     shutil.copyfileobj(f_src, f_dest)
 
-                command = construct_docker_command("jaaql_container", "/slurp-in/" + the_file, the_database)
+                command = construct_docker_command("jaaql_container", "/slurp-in/" + os.path.basename(the_file), the_database)
                 result = execute_command(state, command)
 
                 if result.returncode != 0 or len(result.stderr) != 0:
