@@ -1013,9 +1013,11 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
         deal_with_input(state, file_content)
 
 
-def initialise(file_name: str, file_content: str, configs: list[[str, str]], encoded_configs: list[[str, str, str, str, str | None]],
-               override_url: str, folder_name: str = None, do_prepare: bool = False):
+def initialise(file_name: str, configs: list[[str, str]], encoded_configs: list[[str, str, str, str, str | None]],
+               override_url: str, folder_name: str = None, do_prepare: bool = False, file_content: str | None = None, additional_args: list = None):
     args = [ARGS__single_query[0]]
+    if additional_args is not None:
+        args = args + additional_args
 
     for config in configs:
         args.append(ARGS__config[0])
