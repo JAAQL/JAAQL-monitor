@@ -1006,8 +1006,9 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
                      # raise JAAQLMonitorException("Unrecognised file extension for file " + full_file_name)
                     continue  # Just ignore, it's not a problem
 
-                if configuration_name in state.connections:
-                    continue  # Allow this
+                # We replace it now!
+                # if configuration_name in state.connections:
+                #     continue  # Allow this
 
                 state.connections[configuration_name] = full_file_name
 
