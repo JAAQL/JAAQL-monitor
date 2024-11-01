@@ -84,6 +84,7 @@ ARGS__environment = ['-e', '--environment-file']
 ARGS__allow_unused_parameters = ['-a', '--allow-unused-parameters']
 ARGS__clone_as_attach = ['--clone-as-attach']
 ARGS__slurp_in_location = ['--jaaql-slurp-in-location']
+ARGS__cost_only = ['--cost-only']
 
 
 class JAAQLMonitorException(Exception):
@@ -583,7 +584,7 @@ def parse_user_printing_any_errors(state, potential_user, allow_spaces: bool = F
     return potential_user.split("@")[1].split(" ")[0]
 
 
-def deal_with_prepare(state: State, file_content: str = None):
+def deal_with_prepare(state: State, file_content: str = None, cost_only: bool = False):
     if len(state.connections) != 0 and state.connections.get(DEFAULT_CONNECTION):
         state.set_current_connection(get_connection_info(state, DEFAULT_CONNECTION), DEFAULT_CONNECTION)  # Preloads the default connection
 
@@ -591,7 +592,8 @@ def deal_with_prepare(state: State, file_content: str = None):
 
     send_json = {
         "queries": file_content,
-        "database": cur_conn.database if cur_conn.database is not None else (state.database_override if state.database_override is not None else None)
+        "database": cur_conn.database if cur_conn.database is not None else (state.database_override if state.database_override is not None else None),
+        "cost_only": cost_only
     }
 
     state.request_handler(METHOD__post, ENDPOINT__prepare, send_json=send_json, format_as_query_output=False, compress_output_unless=["exception"])
@@ -916,6 +918,8 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
     state.prevent_unused_parameters = len([arg for arg in args if arg in ARGS__allow_unused_parameters]) == 0
     state.clone_as_attach = len([arg for arg in args if arg in ARGS__clone_as_attach]) == 1
 
+    cost_only = len([arg for arg in args if arg in ARGS__cost_only]) == 1
+
     if state.is_verbose:
         print_version()
 
@@ -1013,7 +1017,7 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
                 state.connections[configuration_name] = full_file_name
 
     if do_prepare:
-        deal_with_prepare(state, file_content)
+        deal_with_prepare(state, file_content, cost_only=cost_only)
     else:
         deal_with_input(state, file_content)
 
