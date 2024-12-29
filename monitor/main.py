@@ -4,7 +4,6 @@ from json import JSONDecodeError
 from monitor.version import print_version, VERSION
 import sys
 import requests
-from pathlib import Path
 from sys import exit
 from getpass import getpass
 from inspect import getframeinfo, stack
@@ -77,6 +76,7 @@ ARGS__encoded_config = ['--encoded-config']
 ARGS__config = ['-c', '--config']
 ARGS__folder_config = ['-f', '--folder-config']
 ARGS__input_file = ['-i', '--input-file']
+ARGS__psql_file = ['--psql-input-file']
 ARGS__parameter = ['-p', '--parameter']
 ARGS__single_query = ['-s', '--single-query']
 ARGS__skip_auth = ['-a', '--skip-auth']
@@ -135,6 +135,11 @@ class ConnectionInfo:
         return formatted
 
 
+FUTURE_TYPE_none = 0
+FUTURE_TYPE_input = 1
+FUTURE_TYPE_psql = 2
+
+
 class State:
     def __init__(self):
         self.was_go = False
@@ -162,6 +167,8 @@ class State:
 
         self.do_exit = True
 
+        self.future_files = []
+
         self.database_override = None
         self.is_transactional = True
 
@@ -174,6 +181,12 @@ class State:
 
     def is_script(self):
         return self.file_name is not None
+
+    def get_next(self):
+        if len(self.future_files) == 0:
+            return FUTURE_TYPE_none
+        else:
+            return self.future_files.pop(0)
 
     def get_current_connection(self) -> ConnectionInfo:
         if self._current_connection is None:
@@ -276,6 +289,9 @@ def split_by_lines(split_str, gap=1):
 
 
 def get_connection_info(state: State, connection_name: str = None, file_name: str = None, override_username: str = None):
+    if connection_name == DEFAULT_CONNECTION and DEFAULT_CONNECTION not in state.connections:
+        lookup_name = list(state.connections.keys())[0]
+        connection_name = lookup_name
     if connection_name and connection_name in state.connection_info:
         return state.connection_info[connection_name]
     elif connection_name and connection_name in state.connections:
@@ -694,6 +710,21 @@ def read_utf8_lines(state, filename):
         print_error(state, "Could not locate file: " + filename)
 
 
+def execute_file_with_psql(state: State, username, database, file_relative, file_absolute):
+    insert_prior = f'SET SESSION AUTHORIZATION "{username}";'
+    with open(file_absolute, 'r', encoding='utf-8-sig') as f_src, open(state.slurp_in_location + "/" + os.path.basename(file_relative), 'w',
+                                                                       encoding='utf-8') as f_dest:
+        f_dest.write(insert_prior + '\n')
+        f_dest.write("SET client_min_messages=WARNING;\n")
+        shutil.copyfileobj(f_src, f_dest)
+
+    command = construct_docker_command("jaaql_container", "/slurp-in/" + os.path.basename(file_relative), database)
+    result = execute_command(state, command)
+
+    if result.returncode != 0 or len(result.stderr) != 0:
+        print_error(state, f"Error executing: {file_relative}\n\n{result.stderr}")
+
+
 def deal_with_input(state: State, file_content: str = None):
     if len(state.connections) == 0 and state.is_script():
         print_error(state, "Must supply credentials file as argument in script mode")
@@ -839,21 +870,8 @@ def deal_with_input(state: State, file_content: str = None):
                     print_error(state, "No 'slurp in location' provided. Use arg '%s'" % ARGS__slurp_in_location[0])
 
                 connection = get_connection_info(state, connection_name=the_user)
-                the_database = connection.database
-
                 file_path = os.path.join(dirname(state.file_name), the_file)
-                insert_prior = f'SET SESSION AUTHORIZATION "{connection.username}";'
-                with open(file_path, 'r', encoding='utf-8-sig') as f_src, open(os.path.join(state.slurp_in_location, os.path.basename(the_file)), 'w', encoding='utf-8') as f_dest:
-                    f_dest.write(insert_prior + '\n')
-                    f_dest.write("SET client_min_messages=WARNING;\n")
-                    shutil.copyfileobj(f_src, f_dest)
-
-                command = construct_docker_command("jaaql_container", "/slurp-in/" + os.path.basename(the_file), the_database)
-                result = execute_command(state, command)
-
-                if result.returncode != 0 or len(result.stderr) != 0:
-                    print_error(state, f"Error executing: {the_file}\n\n{result.stderr}")
-
+                execute_file_with_psql(state, connection.username, connection.database, the_file, file_path)
             elif fetched_line == COMMAND__quit or fetched_line == COMMAND__quit_short:
                 break
             else:
@@ -903,6 +921,12 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
     state.do_exit = do_exit
 
     if file_name is None:
+        for idx, arg in zip(range(len(args)), args):
+            if arg in ARGS__input_file:
+                state.future_files.append({"name": args[idx + 1], "type": FUTURE_TYPE_input})
+            elif arg in ARGS__psql_file:
+                state.future_files.append({"name": args[idx + 1], "type": FUTURE_TYPE_psql})
+
         file_name = [idx for arg, idx in zip(args, range(len(args))) if arg in ARGS__input_file]
         if len(file_name) != 0:
             state.file_name = args[file_name[0] + 1]
@@ -928,6 +952,12 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
             if arg_idx == len(args) - 1:
                 print_error(state, "The slurp in arg is the last argument. You need to supply a directory")
             state.slurp_in_location = args[arg_idx + 1]
+            for item in os.listdir(state.slurp_in_location):
+                item_path = os.path.join(state.slurp_in_location, item)
+                if os.path.isfile(item_path) or os.path.islink(item_path):
+                    os.unlink(item_path)
+                elif os.path.isdir(item_path):
+                    shutil.rmtree(item_path)
 
         if arg not in ARGS__parameter:
             continue
@@ -1019,7 +1049,23 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
     if do_prepare:
         deal_with_prepare(state, file_content, cost_only=cost_only)
     else:
-        deal_with_input(state, file_content)
+        if file_content is not None:
+            deal_with_input(state, file_content)
+        else:
+            while (future := state.get_next()) != FUTURE_TYPE_none:
+                state.file_name = future['name']
+                if future['type'] == FUTURE_TYPE_input:
+                    deal_with_input(state, file_content)
+                else:
+                    default_connection = get_connection_info(state, connection_name=DEFAULT_CONNECTION)
+                    exec_as = "dba" if state.file_name.endswith("dba") else "jaaql"
+                    the_database = default_connection.database
+                    try:
+                        the_database = get_connection_info(state, connection_name="dba_db" if state.file_name.endswith("dba") else "jaaql").database
+                        exec_as = "dba" if state.file_name.endswith("dba") else "jaaql"
+                    except:
+                        pass
+                    execute_file_with_psql(state, exec_as, the_database, state.file_name, state.file_name)
 
 
 def initialise(file_name: str, configs: list[[str, str]], encoded_configs: list[[str, str, str, str, str | None]],
