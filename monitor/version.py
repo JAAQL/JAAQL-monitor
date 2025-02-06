@@ -1,5 +1,5 @@
 GENERATED_AT = "2024-12-29T18:50:10.634059+00:00"
-VERSION = "1.5.2"
+VERSION = "1.6.0"
 
 
 def print_version():

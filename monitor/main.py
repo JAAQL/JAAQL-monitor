@@ -1,4 +1,6 @@
 import traceback
+import tempfile
+
 from json import JSONDecodeError
 
 from monitor.version import print_version, VERSION
@@ -48,6 +50,7 @@ COMMAND__wipe_dbms = "\\wipe dbms"
 COMMAND__switch_jaaql_account_to = "\\switch jaaql account to "
 COMMAND__connect_to_database = "\\connect to database "
 COMMAND__register_jaaql_account_with = "\\register jaaql account with "
+COMMAND__federate_jaaql_account_with = "\\federate jaaql account with @user "
 COMMAND__psql = "\\psql "
 COMMAND__clone_jaaql_account = "\\clone jaaql account "
 COMMAND__attach_email_account = "\\attach email account "
@@ -565,6 +568,23 @@ def register_jaaql_account(state, credentials_name: str, connection_info: Connec
                     (credentials_name, connection_info.username, res.status_code, res.text))
 
 
+def federate_jaaql_user_account(state, credentials_name: str, connection_info: ConnectionInfo, provider: str, tenant: str, sub: str):
+    send_json = {
+        "username": connection_info.username,
+        "password": None if state.clone_as_attach else connection_info.password,
+        "provider": provider,
+        "tenant": tenant,
+        "sub": sub,
+        "attach_as": connection_info.username
+    }
+    endpoint = ENDPOINT__attach_batch
+    res = state.request_handler(METHOD__post, endpoint, send_json={"accounts": [send_json]}, handle_error=False)
+
+    if res.status_code != 200:
+        print_error(state, "Error registering jaaql account '%s' with username '%s', received status code %d and message:\n\n\t%s" %
+                    (credentials_name, connection_info.username, res.status_code, res.text))
+
+
 def on_go(state):
     for parameter, value in state.parameters.items():
         state.fetched_query = state.fetched_query.replace("{{" + parameter + "}}", value)
@@ -710,7 +730,7 @@ def read_utf8_lines(state, filename):
         print_error(state, "Could not locate file: " + filename)
 
 
-def execute_file_with_psql(state: State, username, database, file_relative, file_absolute):
+def execute_file_with_psql(state: State, username, database, file_relative, file_absolute, url):
     insert_prior = f'SET SESSION AUTHORIZATION "{username}";'
     with open(file_absolute, 'r', encoding='utf-8-sig') as f_src, open(state.slurp_in_location + "/" + os.path.basename(file_relative), 'w',
                                                                        encoding='utf-8') as f_dest:
@@ -718,7 +738,7 @@ def execute_file_with_psql(state: State, username, database, file_relative, file
         f_dest.write("SET client_min_messages=WARNING;\n")
         shutil.copyfileobj(f_src, f_dest)
 
-    command = construct_docker_command("jaaql_container", "/slurp-in/" + os.path.basename(file_relative), database)
+    command = construct_docker_command("jaaql_pg" if "6060" in url else "jaaql_container", "/slurp-in/" + os.path.basename(file_relative), database)
     result = execute_command(state, command)
 
     if result.returncode != 0 or len(result.stderr) != 0:
@@ -792,6 +812,8 @@ def deal_with_input(state: State, file_content: str = None):
                     "cur_file_name": state.file_name
                 })
                 import_file = " ".join(fetched_line.split(COMMAND__import)[1:]).strip()
+                if import_file.startswith("%TEMP%"):
+                    import_file = import_file.replace("%TEMP%", tempfile.gettempdir().replace("\\", "/"))
                 file_path = os.path.join(dirname(state.file_name), import_file)
                 state.file_name = file_path
                 state.file_lines = read_utf8_lines(state, state.file_name)
@@ -832,10 +854,11 @@ def deal_with_input(state: State, file_content: str = None):
             elif fetched_line.startswith(COMMAND__clone_jaaql_account):
                 candidate_connection_name = fetched_line.split(COMMAND__clone_jaaql_account)[1].split(" ")[0]
                 connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
-                users = " ".join(fetched_line.split(COMMAND__clone_jaaql_account)[1].split(" ")[2:])
-                users = [user.strip() for user in users.split(",")]
+                federation_data = json.loads(" ".join(fetched_line.split(COMMAND__clone_jaaql_account)[1].split(" ")[1:]))
 
-                register_jaaql_account(state, connection_name, get_connection_info(state, connection_name=connection_name), clone_users=users)
+                connection_info = get_connection_info(state, connection_name=connection_name)
+                federate_jaaql_user_account(state, connection_name, connection_info, federation_data["provider"], federation_data["tenant"],
+                                            federation_data["sub"])
             elif fetched_line.startswith(COMMAND__register_jaaql_account_with):
                 candidate_connection_name = fetched_line.split(COMMAND__register_jaaql_account_with)[1].split(" ")[0]
                 overriding = fetched_line.split(" overriding username as ")
@@ -846,6 +869,13 @@ def deal_with_input(state: State, file_content: str = None):
                 connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
 
                 register_jaaql_account(state, connection_name, get_connection_info(state, connection_name=connection_name, override_username=overriding))
+            elif fetched_line.startswith(COMMAND__federate_jaaql_account_with):
+                candidate_connection_name = fetched_line.split(COMMAND__federate_jaaql_account_with)[1].split(" ")[0]
+                connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
+                federation_data = json.loads(" ".join(fetched_line.split(COMMAND__federate_jaaql_account_with)[1].split(" ")[1:]))
+                connection_info = get_connection_info(state, connection_name=connection_name, override_username=federation_data.username)
+                federate_jaaql_user_account(state, connection_name, connection_info, federation_data["provider"], federation_data["tenant"],
+                                            federation_data["sub"])
             elif fetched_line.startswith(COMMAND__attach_email_account):
                 candidate_connection_name = fetched_line.split(COMMAND__attach_email_account)[1]
                 connection_name = parse_user_printing_any_errors(state, candidate_connection_name, allow_spaces=True)
@@ -871,7 +901,7 @@ def deal_with_input(state: State, file_content: str = None):
 
                 connection = get_connection_info(state, connection_name=the_user)
                 file_path = os.path.join(dirname(state.file_name), the_file)
-                execute_file_with_psql(state, connection.username, connection.database, the_file, file_path)
+                execute_file_with_psql(state, connection.username, connection.database, the_file, file_path, connection.get_http_url())
             elif fetched_line == COMMAND__quit or fetched_line == COMMAND__quit_short:
                 break
             else:
@@ -1065,7 +1095,7 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
                         exec_as = "dba" if state.file_name.endswith("dba") else "jaaql"
                     except:
                         pass
-                    execute_file_with_psql(state, exec_as, the_database, state.file_name, state.file_name)
+                    execute_file_with_psql(state, exec_as, the_database, state.file_name, state.file_name, default_connection.get_http_url())
 
 
 def initialise(file_name: str, configs: list[[str, str]], encoded_configs: list[[str, str, str, str, str | None]],
