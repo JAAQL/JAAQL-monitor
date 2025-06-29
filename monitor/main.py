@@ -671,7 +671,7 @@ def read_file_lines_with_fallback(file_path, first_encoding='utf-8-sig', second_
         raise e
 
 
-def construct_docker_command(container_name, sql_file_path_inside_container, supplied_database):
+def construct_docker_command(container_name, sql_file_path_inside_container, supplied_database, session_user):
     """
     Constructs the Docker command based on the operating system.
     """
@@ -687,6 +687,8 @@ def construct_docker_command(container_name, sql_file_path_inside_container, sup
         "psql",
         "-U", "postgres",
         "-d", supplied_database,
+        "-c", f'SET SESSION AUTHORIZATION "{session_user}";',
+        "-c", "SET client_min_messages = WARNING;",
         "-f", sql_file_path_inside_container
     ]
 
@@ -731,14 +733,7 @@ def read_utf8_lines(state, filename):
 
 
 def execute_file_with_psql(state: State, username, database, file_relative, file_absolute, url):
-    insert_prior = f'SET SESSION AUTHORIZATION "{username}";'
-    with open(file_absolute, 'r', encoding='utf-8-sig') as f_src, open(state.slurp_in_location + "/" + os.path.basename(file_relative), 'w',
-                                                                       encoding='utf-8') as f_dest:
-        f_dest.write(insert_prior + '\n')
-        f_dest.write("SET client_min_messages=WARNING;\n")
-        shutil.copyfileobj(f_src, f_dest)
-
-    command = construct_docker_command("jaaql_pg" if "6060" in url else "jaaql_container", "/slurp-in/" + os.path.basename(file_relative), database)
+    command = construct_docker_command("jaaql_pg" if "6060" in url else "jaaql_container", "/slurp-in/" + os.path.basename(file_relative), database, username)
     result = execute_command(state, command)
 
     if result.returncode != 0 or len(result.stderr) != 0:
