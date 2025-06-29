@@ -730,8 +730,8 @@ def read_utf8_lines(state, filename):
         print_error(state, "Could not locate file: " + filename)
 
 
-def execute_file_with_psql(state: State, username, database, file_relative, file_absolute, url):
-    command = construct_docker_command("jaaql_pg" if "6060" in url else "jaaql_container", "/slurp-in/" + os.path.basename(file_relative), database, username)
+def execute_file_with_psql(state: State, username, database, file_relative, url):
+    command = construct_docker_command("jaaql_pg" if "6060" in url else "jaaql_container", "/slurp-in/" + file_relative, database, username)
     result = execute_command(state, command)
 
     if result.returncode != 0 or len(result.stderr) != 0:
@@ -890,8 +890,7 @@ def deal_with_input(state: State, file_content: str = None):
                 the_file = fetched_line.split(COMMAND__psql)[1].split(" ")[1]
 
                 connection = get_connection_info(state, connection_name=the_user)
-                file_path = os.path.join(dirname(state.file_name), the_file)
-                execute_file_with_psql(state, connection.username, connection.database, the_file, file_path, connection.get_http_url())
+                execute_file_with_psql(state, connection.username, connection.database, the_file, connection.get_http_url())
             elif fetched_line == COMMAND__quit or fetched_line == COMMAND__quit_short:
                 break
             else:
@@ -1074,7 +1073,7 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
                         exec_as = "dba" if state.file_name.endswith("dba") else "jaaql"
                     except:
                         pass
-                    execute_file_with_psql(state, exec_as, the_database, state.file_name, state.file_name, default_connection.get_http_url())
+                    execute_file_with_psql(state, exec_as, the_database, state.file_name, default_connection.get_http_url())
 
 
 def initialise(file_name: str, configs: list[[str, str]], encoded_configs: list[[str, str, str, str, str | None]],
