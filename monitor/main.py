@@ -86,7 +86,6 @@ ARGS__skip_auth = ['-a', '--skip-auth']
 ARGS__environment = ['-e', '--environment-file']
 ARGS__allow_unused_parameters = ['-a', '--allow-unused-parameters']
 ARGS__clone_as_attach = ['--clone-as-attach']
-ARGS__slurp_in_location = ['--jaaql-slurp-in-location']
 ARGS__cost_only = ['--cost-only']
 
 
@@ -166,7 +165,6 @@ class State:
         self.reading_parameters = False
         self.prevent_unused_parameters = True
         self.clone_as_attach = False
-        self.slurp_in_location = None
 
         self.do_exit = True
 
@@ -891,9 +889,6 @@ def deal_with_input(state: State, file_content: str = None):
                 the_user = parse_user_printing_any_errors(state, fetched_line.split(COMMAND__psql)[1].split(" ")[0])
                 the_file = fetched_line.split(COMMAND__psql)[1].split(" ")[1]
 
-                if state.slurp_in_location is None:
-                    print_error(state, "No 'slurp in location' provided. Use arg '%s'" % ARGS__slurp_in_location[0])
-
                 connection = get_connection_info(state, connection_name=the_user)
                 file_path = os.path.join(dirname(state.file_name), the_file)
                 execute_file_with_psql(state, connection.username, connection.database, the_file, file_path, connection.get_http_url())
@@ -973,17 +968,6 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
         print_version()
 
     for arg, arg_idx in zip(args, range(len(args))):
-        if arg in ARGS__slurp_in_location:
-            if arg_idx == len(args) - 1:
-                print_error(state, "The slurp in arg is the last argument. You need to supply a directory")
-            state.slurp_in_location = args[arg_idx + 1]
-            for item in os.listdir(state.slurp_in_location):
-                item_path = os.path.join(state.slurp_in_location, item)
-                if os.path.isfile(item_path) or os.path.islink(item_path):
-                    os.unlink(item_path)
-                elif os.path.isdir(item_path):
-                    shutil.rmtree(item_path)
-
         if arg not in ARGS__parameter:
             continue
 
