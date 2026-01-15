@@ -41,6 +41,7 @@ COMMAND__initialiser = "\\"
 COMMAND__reset_short = "\\r"
 COMMAND__import = "\\import"
 COMMAND__reset = "\\reset"
+COMMAND__assert_equals = "\\="
 COMMAND__go_short = "\\g"
 COMMAND__go = "\\go"
 COMMAND__print_short = "\\p"
@@ -231,7 +232,7 @@ class State:
         return int(round((end_time - start_time).total_seconds() * 1000))
 
     def request_handler(self, method, endpoint, send_json=None, handle_error: bool = True, format_as_query_output: bool = True,
-                        compress_output_unless: list = None, line_offset: int = 0):
+                        compress_output_unless: list = None, line_offset: int = 0, silent_success: bool = False):
         conn = self.get_current_connection()
         if conn.oauth_token is None:
             if conn.password.startswith(MARKER__bypass):
@@ -252,32 +253,41 @@ class State:
 
         self.log("Request took " + str(State.time_delta_ms(start_time, datetime.now())) + "ms")
 
-        if res.status_code == 200 and format_as_query_output:
-            was_explain = False
-            if send_json is not None:
-                if "query" in send_json:
-                    was_explain = len([line for line in split_by_lines(send_json["query"]) if line.strip().startswith("EXPLAIN ANALYZE")]) != 0
+        if res.status_code == 200:
+            if silent_success:
+                return res
 
-            if was_explain:
-                rows = res.json()["rows"]
-                self.log("")
-                self.log("")
-                for row in rows:
-                    self.log(row[0])
+            if format_as_query_output:
+                was_explain = False
+                if send_json is not None:
+                    if "query" in send_json:
+                        was_explain = len([line for line in split_by_lines(send_json["query"]) if
+                                           line.strip().startswith("EXPLAIN ANALYZE")]) != 0
+
+                if was_explain:
+                    rows = res.json()["rows"]
+                    self.log("")
+                    self.log("")
+                    for row in rows:
+                        self.log(row[0])
+                else:
+                    format_query_output(self, res.json())
             else:
-                format_query_output(self, res.json())
-        elif res.status_code == 200:
-            if compress_output_unless is not None and isinstance(res.json(), list):
-                perhaps_expanded = ["\n    ".join(json.dumps(itm, indent=4 if any([itm.get(val) is not None for val in compress_output_unless]) else None).split("\n")) for itm in res.json()]
-                print("[\n    " + ",\n    ".join(perhaps_expanded) + "\n]")
-            else:
-                print(json.dumps(res.json(), indent=4))
+                if compress_output_unless is not None and isinstance(res.json(), list):
+                    perhaps_expanded = ["\n    ".join(json.dumps(itm, indent=4 if any(
+                        [itm.get(val) is not None for val in compress_output_unless]) else None).split("\n")) for itm in
+                                        res.json()]
+                    print("[\n    " + ",\n    ".join(perhaps_expanded) + "\n]")
+                else:
+                    print(json.dumps(res.json(), indent=4))
         else:
             if handle_error:
                 if endpoint == ENDPOINT__submit:
                     submit_error(self, res.text, line_offset=line_offset)
                 else:
                     print_error(self, res.text)
+
+        return res
 
         return res
 
@@ -583,6 +593,194 @@ def federate_jaaql_user_account(state, credentials_name: str, connection_info: C
                     (credentials_name, username, res.status_code, res.text))
 
 
+def _render_rows_for_assertion_error(json_output, max_rows: int = 25) -> str:
+    """
+    Render returned rows as JSON-ish data for assertion failures.
+    Keeps it readable and avoids your output-table truncation rules.
+    """
+    rows = json_output.get("rows", None)
+    columns = json_output.get("columns", None)
+
+    if rows is None:
+        return "(Response did not contain 'rows')"
+
+    if not isinstance(rows, list):
+        return "(Response 'rows' was not a list)"
+
+    show_rows = rows[:max_rows]
+
+    rendered = []
+    if isinstance(columns, list) and all(isinstance(c, str) for c in columns):
+        for row in show_rows:
+            if isinstance(row, list) and len(row) == len(columns):
+                rendered.append({columns[i]: row[i] for i in range(len(columns))})
+            else:
+                rendered.append(row)
+    else:
+        rendered = show_rows
+
+    suffix = ""
+    if len(rows) > max_rows:
+        suffix = "\n... (%d more row(s) not shown)" % (len(rows) - max_rows)
+
+    return json.dumps(rendered, indent=4, default=str) + suffix
+
+
+def on_go_expect_equals(state: State, expected_raw: str):
+    """
+    Submit the current query buffer and assert:
+      1) exactly 1 row
+      2) exactly 1 value in that row
+      3) the string form of that value equals expected_raw
+
+    Special handling:
+      - expected_raw == "(NULL)" matches actual None
+      - expected_raw == "null" matches string "null" (warn if actual is None)
+      - expected_raw == "" matches empty string
+    """
+    if len(state.fetched_query.strip()) == 0:
+        print_error(state, "Tried to use \\= but buffer was empty.")
+        return
+
+    # Apply parameters exactly like on_go()
+    for parameter, value in state.parameters.items():
+        state.fetched_query = state.fetched_query.replace("{{" + parameter + "}}", value)
+
+    send_json = {"query": state.fetched_query}
+
+    if state.query_parameters is not None:
+        try:
+            send_json["parameters"] = json.loads(state.query_parameters)
+        except JSONDecodeError as ex:
+            print_error(state, "You have messed up your parameters: " + str(ex))
+            return
+
+    cur_conn = state.get_current_connection()
+    if cur_conn.database is not None:
+        send_json["database"] = cur_conn.database
+    if state.database_override is not None:
+        send_json["database"] = state.database_override
+    if not state.is_transactional:
+        send_json["autocommit"] = True
+    if not state.prevent_unused_parameters:
+        send_json["prevent_unused_parameters"] = False
+
+    # Keep the same line_offset strategy you use for normal submit errors
+    line_offset = len(state.fetched_query.splitlines()) - 1
+
+    res = state.request_handler(
+        METHOD__post,
+        ENDPOINT__submit,
+        send_json=send_json,
+        line_offset=line_offset,
+        silent_success=True
+    )
+
+    # Clear buffer regardless (same as on_go)
+    state.fetched_query = ""
+    state.query_parameters = None
+
+    if res.status_code != 200:
+        # request_handler already printed submit_error / print_error
+        return
+
+    try:
+        json_output = res.json()
+    except JSONDecodeError:
+        print_error(state, "Assertion failed: server returned non-JSON response:\n\n" + res.text)
+        return
+
+    rows = json_output.get("rows", None)
+    columns = json_output.get("columns", None)
+
+    if rows is None:
+        print_error(state, "Assertion failed: server response did not contain 'rows'.\n\nResponse:\n" + json.dumps(json_output, indent=4, default=str))
+        return
+
+    if not isinstance(rows, list):
+        print_error(state, "Assertion failed: response 'rows' was not a list.\n\nResponse:\n" + json.dumps(json_output, indent=4, default=str))
+        return
+
+    expected_is_null_marker = expected_raw.upper() == "(NULL)"
+    expected_is_literal_null_string = expected_raw == "null"
+    expected_display = expected_raw
+
+    # 1) exactly 1 row
+    if len(rows) == 0:
+        print_error(state, "Assertion failed (\\=%s): query returned 0 rows (expected exactly 1 row)." % expected_display)
+        return
+
+    if len(rows) != 1:
+        details = _render_rows_for_assertion_error(json_output, max_rows=25)
+        msg = (
+            "Assertion failed (\\=%s): query returned %d rows (expected exactly 1 row).\n\nReturned rows:\n%s"
+            % (expected_display, len(rows), details)
+        )
+        print_error(state, msg)
+        return
+
+    row = rows[0]
+
+    # 2) exactly 1 value in that row
+    if not isinstance(row, list):
+        print_error(state, "Assertion failed (\\=%s): row was not a list. Row value:\n%s" % (expected_display, repr(row)))
+        return
+
+    if len(row) == 0:
+        print_error(state, "Assertion failed (\\=%s): row had 0 values (expected exactly 1 value)." % expected_display)
+        return
+
+    if len(row) != 1:
+        row_details = json.dumps(
+            {columns[i]: row[i] for i in range(min(len(columns or []), len(row)))} if isinstance(columns, list) else row,
+            indent=4,
+            default=str
+        )
+        msg = (
+            "Assertion failed (\\=%s): query returned 1 row but %d values (expected exactly 1 value).\n\nReturned row:\n%s"
+            % (expected_display, len(row), row_details)
+        )
+        print_error(state, msg)
+        return
+
+    actual = row[0]
+
+    # 3) match expected string semantics
+    if expected_is_null_marker:
+        if actual is not None:
+            msg = (
+                "Assertion failed (\\=%s): expected NULL but got %s (type=%s)."
+                % (expected_display, repr(actual), type(actual).__name__)
+            )
+            print_error(state, msg)
+        return
+
+    # Non-NULL marker expects a real value (possibly empty string)
+    if actual is None:
+        warn = ""
+        if expected_is_literal_null_string:
+            warn = "\n\nWarning: query returned NULL. If you intended to match NULL, use \\=(NULL)."
+        msg = (
+            "Assertion failed (\\=%s): expected '%s' but query returned NULL."
+            % (expected_display, expected_raw)
+        ) + warn
+        print_error(state, msg)
+        return
+
+    actual_str = str(actual)
+
+    if actual_str != expected_raw:
+        msg = (
+            "Assertion failed (\\=%s): value mismatch.\n\n"
+            "Expected: '%s'\n"
+            "Actual:    '%s'\n"
+            "Actual repr: %s (type=%s)"
+            % (expected_display, expected_raw, actual_str, repr(actual), type(actual).__name__)
+        )
+        print_error(state, msg)
+        return
+
+
 def on_go(state):
     for parameter, value in state.parameters.items():
         state.fetched_query = state.fetched_query.replace("{{" + parameter + "}}", value)
@@ -790,6 +988,9 @@ def deal_with_input(state: State, file_content: str = None):
             fetched_line = fetched_line.strip()  # Ignore the line terminator e.g. \r\n
             if fetched_line == COMMAND__go or fetched_line == COMMAND__go_short:
                 on_go(state)
+            elif fetched_line.startswith(COMMAND__assert_equals):
+                expected = fetched_line[len(COMMAND__assert_equals):]
+                on_go_expect_equals(state, expected)
             elif fetched_line == COMMAND__reset or fetched_line == COMMAND__reset_short:
                 state.fetched_query = ""
             elif fetched_line == COMMAND__print or fetched_line == COMMAND__print_short:
