@@ -929,10 +929,27 @@ def read_utf8_lines(state, filename):
 
 
 def execute_file_with_psql(state: State, username, database, file_relative, url):
-    command = construct_docker_command("jaaql_pg" if "6060" in url else "jaaql_container", "/slurp-in/" + file_relative, database, username)
+    expect_error = ".error." in file_relative
+    command = construct_docker_command(
+        "jaaql_pg" if "6060" in url else "jaaql_container",
+        "/slurp-in/" + file_relative,
+        database,
+        username
+    )
     result = execute_command(state, command)
 
-    if result.returncode != 0 or len(result.stderr) != 0:
+    had_error = (result.returncode != 0) or (len(result.stderr) != 0)
+
+    if expect_error:
+        # If we got the error we expected, continue silently.
+        if had_error:
+            return
+        # If we did NOT error, fail the run and explain.
+        print_error(state, f"Expected an error executing: {file_relative}\n\nBut the command succeeded (no error was raised).")
+        return
+
+    # Normal behaviour (no expected error)
+    if had_error:
         print_error(state, f"Error executing: {file_relative}\n\n{result.stderr}")
 
 
