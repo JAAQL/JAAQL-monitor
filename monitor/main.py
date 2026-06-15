@@ -1321,5 +1321,34 @@ def initialise(file_name: str, configs: list[[str, str]], encoded_configs: list[
     initialise_from_args(args, file_name, file_content, False, override_url, do_prepare=do_prepare)
 
 
+def expand_args_file(argv):
+    # The microcompiler hands a large install arg-set over as a response file ("--args-file <path>",
+    # one arg per line) to stay under Windows' ~8191-char cmd.exe command-line limit. Expand it back
+    # into argv here so the args never have to traverse a command line at all.
+    expanded = []
+    idx = 0
+    while idx < len(argv):
+        arg = argv[idx]
+        if arg == "--args-file":
+            if idx + 1 >= len(argv):
+                raise Exception("--args-file flag supplied without a file path")
+            args_file_path = argv[idx + 1]
+            idx += 2
+        elif arg.startswith("--args-file="):
+            args_file_path = arg[len("--args-file="):]
+            idx += 1
+        else:
+            expanded.append(arg)
+            idx += 1
+            continue
+        with open(args_file_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        lines = content.split("\n")
+        if lines and lines[-1] == "" and content.endswith("\n"):
+            lines.pop()
+        expanded.extend(line[:-1] if line.endswith("\r") else line for line in lines)
+    return expanded
+
+
 if __name__ == "__main__":
-    initialise_from_args(sys.argv[1:])
+    initialise_from_args(expand_args_file(sys.argv[1:]))
