@@ -17,6 +17,7 @@ import shutil
 import json
 import platform
 import subprocess
+import time
 
 HEADER__security_bypass = "Authentication-Token-Bypass"
 HEADER__security_bypass_jaaql = "Authentication-Token-Bypass-Jaaql"
@@ -36,6 +37,15 @@ ENDPOINT__wipe = "/internal/clean"
 ENDPOINT__set_web_config = "/internal/set-web-config"
 ENDPOINT__freeze = "/internal/freeze"
 ENDPOINT__defrost = "/internal/defrost"
+ENDPOINT__is_alive = "/internal/is-alive"
+
+# \wipe dbms reinstalls JAAQL, which trips the intended post-install server restart
+# (gunicorn child_exit + was_installed -> SIGQUIT -> fresh workers). That restart is asynchronous and
+# lands shortly AFTER /internal/clean returns 200, so the next request would otherwise race the bounce
+# and fail transiently. After a wipe we wait for the restart to begin (server drops) then complete.
+WAIT__restart_begin_seconds = 20     # grace for the restart to start; if it never does, proceed
+WAIT__restart_complete_seconds = 120  # max wait for the server to come back up
+WAIT__restart_stable_checks = 3       # consecutive is-alive 200s that confirm the restart finished
 
 COMMAND__initialiser = "\\"
 COMMAND__reset_short = "\\r"
@@ -525,11 +535,53 @@ def freeze_defrost_instance(state: State, freeze: bool):
         print_error(state, "Error " + verb + " jaaql box, received status code %d and message:\n\n\t%s" % (res.status_code, res.text))
 
 
+def wait_for_server_restart(state: State):
+    # The wipe triggers a full post-install server restart (see WAIT__ constants). Wait it out so the
+    # next request lands on the freshly-restarted workers (fresh pools) instead of racing the bounce.
+    url = state.get_current_connection().get_http_url() + ENDPOINT__is_alive
+
+    def is_up():
+        try:
+            return requests.get(url, timeout=3).status_code == 200
+        except requests.exceptions.RequestException:
+            return False
+
+    # Phase 1: wait for the restart to BEGIN (server drops). If it never drops within the grace
+    # window the reinstall did not restart the server this run, so there is nothing to wait for.
+    began = time.time()
+    went_down = False
+    while time.time() - began < WAIT__restart_begin_seconds:
+        if not is_up():
+            went_down = True
+            break
+        time.sleep(0.2)
+
+    if not went_down:
+        return
+
+    # Phase 2: wait for the restart to COMPLETE - the server up for several consecutive checks so a
+    # brief flap during boot is not mistaken for readiness.
+    began = time.time()
+    consecutive = 0
+    while time.time() - began < WAIT__restart_complete_seconds:
+        if is_up():
+            consecutive += 1
+            if consecutive >= WAIT__restart_stable_checks:
+                return
+        else:
+            consecutive = 0
+        time.sleep(0.3)
+
+    print_error(state, "JAAQL did not come back up within %d seconds after the wipe/restart" % WAIT__restart_complete_seconds)
+
+
 def wipe_jaaql_box(state: State):
     res = state.request_handler(METHOD__post, ENDPOINT__wipe, handle_error=False)
 
     if res.status_code != 200:
         print_error(state, "Error wiping jaaql box, received status code %d and message:\n\n\t%s" % (res.status_code, res.text))
+
+    wait_for_server_restart(state)
 
 
 def set_web_config(state: State):
