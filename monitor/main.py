@@ -541,25 +541,32 @@ def freeze_defrost_instance(state: State, freeze: bool):
 def wait_for_server_restart(state: State):
     # \wipe dbms restarts every gevent worker; the restart is tripped by the first real request after
     # the reinstall, so the build's next request would land on a worker being torn down and die with an
-    # unreadable 1099. Wait until the server can genuinely serve again before continuing. Probe the DEEP
-    # health check, not is-alive: is-alive answers 200 in ~1ms straight through the bounce (it only pings
-    # the DB), whereas deep-health resolves + runs a query through the cache, so it fails while the
-    # workers/cache are not ready and only passes once real requests will succeed. Unauthenticated, so no
-    # token juggling; and the probe itself absorbs the single post-install restart. Require several
-    # consecutive successes so a brief green flap mid-restart is not mistaken for readiness.
-    url = state.get_current_connection().get_http_url() + ENDPOINT__deep_health
-    state.log("Waiting for JAAQL to be healthy again after wipe...")
+    # unreadable 1099. Wait until the server can genuinely serve a query again before continuing.
+    #
+    # Probe with a real trivial query (SELECT 1) through /submit - not is-alive, not deep-health:
+    #   - is-alive answers 200 in ~1ms straight through the bounce (only pings the DB) - it never sees
+    #     the restart, so it is not a valid readiness signal.
+    #   - deep-health needs the compiled query cache (__health__), which the microcompiler only writes
+    #     LATER in the build - it is absent at create_application_database time, so it never goes green.
+    # SELECT 1 exercises the same worker + pooled-connection path the real request will, needs no query
+    # cache, and works with no `database` (like the build's own paramless submits). The probe itself
+    # absorbs the single post-install restart. Require several consecutive successes so a brief green
+    # flap mid-restart is not mistaken for readiness.
+    conn = state.get_current_connection()
+    url = conn.get_http_url() + ENDPOINT__submit
+    state.log("Waiting for JAAQL to be able to serve queries again after wipe...")
 
-    def healthy():
+    def can_serve():
         try:
-            return requests.get(url, timeout=5).status_code == 200
+            return requests.post(url, json={"query": "SELECT 1", "database": "postgres", "autocommit": True},
+                                 headers=conn.oauth_token, timeout=5).status_code == 200
         except requests.exceptions.RequestException:
             return False
 
     deadline = time.time() + WAIT__healthy_seconds
     consecutive = 0
     while time.time() < deadline:
-        if healthy():
+        if can_serve():
             consecutive += 1
             if consecutive >= WAIT__healthy_stable_checks:
                 state.log("JAAQL healthy again.")
@@ -568,7 +575,7 @@ def wait_for_server_restart(state: State):
             consecutive = 0
         time.sleep(WAIT__healthy_poll_interval)
 
-    print_error(state, "JAAQL did not become healthy within %d seconds after the wipe" % WAIT__healthy_seconds)
+    print_error(state, "JAAQL did not become able to serve queries within %d seconds after the wipe" % WAIT__healthy_seconds)
 
 
 def wipe_jaaql_box(state: State):
