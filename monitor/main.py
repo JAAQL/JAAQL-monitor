@@ -983,29 +983,80 @@ def read_utf8_lines(state, filename):
         print_error(state, "Could not locate file: " + filename)
 
 
-def execute_file_with_psql(state: State, username, database, file_relative, url):
-    expect_error = ".error." in file_relative
-    command = construct_docker_command(
-        "jaaql_pg" if "6060" in url else "jaaql_container",
-        "/slurp-in/" + file_relative,
-        database,
-        username
-    )
-    result = execute_command(state, command)
+def psql__shell_quote(value):
+    return "'" + str(value).replace("'", "'\"'\"'") + "'"
 
-    had_error = (result.returncode != 0) or (len(result.stderr) != 0)
 
-    if expect_error:
-        # If we got the error we expected, continue silently.
-        if had_error:
-            return
-        # If we did NOT error, fail the run and explain.
-        print_error(state, f"Expected an error executing: {file_relative}\n\nBut the command succeeded (no error was raised).")
+def execute_files_with_psql(state: State, files, url):
+    container_name = "jaaql_pg" if "6060" in url else "jaaql_container"
+    docker_exec = ["docker", "exec", "-i"]
+    if not platform.system().lower() == 'windows':
+        docker_exec = ["sudo"] + docker_exec
+
+    lines = ["set +e", "err=$(mktemp)"]
+    for idx, (username, database, file_relative) in enumerate(files):
+        expect_error = 1 if ".error." in file_relative else 0
+        lines.append("psql -U postgres -d %s -c %s -c 'SET client_min_messages = WARNING;' -f %s >/dev/null 2>\"$err\"; rc=$?" % (
+            psql__shell_quote(database),
+            psql__shell_quote('SET SESSION AUTHORIZATION "%s";' % username),
+            psql__shell_quote("/slurp-in/" + file_relative)))
+        lines.append("had=0; if [ $rc -ne 0 ] || [ -s \"$err\" ]; then had=1; fi")
+        lines.append("printf '@@RESULT %d %%d\\n' \"$had\"; cat \"$err\"; printf '\\n@@END %d\\n'" % (idx, idx))
+        lines.append("if [ $had -eq 1 ] && [ %d -eq 0 ]; then exit 1; fi" % expect_error)
+    lines.append("exit 0")
+    script = "\n".join(lines) + "\n"
+
+    try:
+        result = subprocess.run(
+            docker_exec + [container_name, "sh", "-s"],
+            input=script.encode("utf-8"),
+            shell=False,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+    except Exception as e:
+        print_error(state, f"Error executing command slurp in command: {e}")
         return
 
-    # Normal behaviour (no expected error)
-    if had_error:
-        print_error(state, f"Error executing: {file_relative}\n\n{result.stderr}")
+    outcomes = {}
+    current = None
+    captured = []
+    stdout = result.stdout.decode("utf-8", errors="replace")
+    stderr_all = result.stderr.decode("utf-8", errors="replace")
+    for line in stdout.replace("\r\n", "\n").split("\n"):
+        if line.startswith("@@RESULT "):
+            _, idx, had = line.split(" ")
+            current = int(idx)
+            outcomes[current] = [had == "1", ""]
+            captured = []
+        elif line.startswith("@@END "):
+            if current is not None:
+                outcomes[current][1] = "\n".join(captured)
+            current = None
+        elif current is not None:
+            captured.append(line)
+
+    for idx, (username, database, file_relative) in enumerate(files):
+        if idx not in outcomes:
+            print_error(state, f"Error executing: {file_relative}\n\n{stderr_all}")
+            return
+        had_error, stderr = outcomes[idx]
+        expect_error = ".error." in file_relative
+
+        if expect_error:
+            if had_error:
+                continue
+            print_error(state, f"Expected an error executing: {file_relative}\n\nBut the command succeeded (no error was raised).")
+            return
+
+        if had_error:
+            print_error(state, f"Error executing: {file_relative}\n\n{stderr}")
+            return
+
+
+def execute_file_with_psql(state: State, username, database, file_relative, url):
+    execute_files_with_psql(state, [(username, database, file_relative)], url)
 
 
 def deal_with_input(state: State, file_content: str = None):
@@ -1159,11 +1210,21 @@ def deal_with_input(state: State, file_content: str = None):
                 attach_email_account(state, dispatcher_fqn_split[0], dispatcher_fqn_split[1], connection_name,
                                      get_connection_info(state, connection_name=connection_name))
             elif fetched_line.startswith(COMMAND__psql):
-                the_user = parse_user_printing_any_errors(state, fetched_line.split(COMMAND__psql)[1].split(" ")[0])
-                the_file = fetched_line.split(COMMAND__psql)[1].split(" ")[1]
+                batch = []
+                url = None
+                while True:
+                    the_user = parse_user_printing_any_errors(state, fetched_line.split(COMMAND__psql)[1].split(" ")[0])
+                    the_file = fetched_line.split(COMMAND__psql)[1].split(" ")[1]
 
-                connection = get_connection_info(state, connection_name=the_user)
-                execute_file_with_psql(state, connection.username, connection.database, the_file, connection.get_http_url())
+                    connection = get_connection_info(state, connection_name=the_user)
+                    batch.append((connection.username, connection.database, the_file))
+                    url = connection.get_http_url()
+                    if len(state.file_lines) == 0 or isinstance(state.file_lines[0], EOFMarker) or not state.file_lines[0].startswith(COMMAND__psql):
+                        break
+                    fetched_line = state.file_lines[0].strip()
+                    state.cur_file_line += 1
+                    state.file_lines = state.file_lines[1:]
+                execute_files_with_psql(state, batch, url)
             elif fetched_line == COMMAND__quit or fetched_line == COMMAND__quit_short:
                 break
             else:
@@ -1339,14 +1400,20 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
                     deal_with_input(state, file_content)
                 else:
                     default_connection = get_connection_info(state, connection_name=DEFAULT_CONNECTION)
-                    exec_as = "dba" if state.file_name.endswith("dba") else "jaaql"
-                    the_database = default_connection.database
-                    try:
-                        the_database = get_connection_info(state, connection_name="dba_db" if state.file_name.endswith("dba") else "jaaql").database
+                    batch = []
+                    while True:
                         exec_as = "dba" if state.file_name.endswith("dba") else "jaaql"
-                    except:
-                        pass
-                    execute_file_with_psql(state, exec_as, the_database, state.file_name, default_connection.get_http_url())
+                        the_database = default_connection.database
+                        try:
+                            the_database = get_connection_info(state, connection_name="dba_db" if state.file_name.endswith("dba") else "jaaql").database
+                            exec_as = "dba" if state.file_name.endswith("dba") else "jaaql"
+                        except:
+                            pass
+                        batch.append((exec_as, the_database, state.file_name))
+                        if len(state.future_files) == 0 or state.future_files[0]['type'] != FUTURE_TYPE_psql:
+                            break
+                        state.file_name = state.get_next()['name']
+                    execute_files_with_psql(state, batch, default_connection.get_http_url())
 
 
 def initialise(file_name: str, configs: list[[str, str]], encoded_configs: list[[str, str, str, str, str | None]],
