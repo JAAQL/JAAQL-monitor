@@ -996,22 +996,71 @@ def psql__shell_quote(value):
     return "'" + str(value).replace("'", "'\"'\"'") + "'"
 
 
+PSQL__marker_begin = "@@B"
+PSQL__marker_end = "@@E"
+
+
+def psql__session_script(files, first_idx):
+    # DISCARD ALL between the files gives each one the clean session a separate psql process gave it;
+    # ON_ERROR_STOP is only on for the files that are not expected to fail, so the session stops where
+    # the loop of separate processes stopped
+    lines = []
+    for offset, (username, database, file_relative) in enumerate(files):
+        lines.append("\\set ON_ERROR_STOP off")
+        lines.append("SET client_min_messages = ERROR;")
+        lines.append("ROLLBACK;")
+        lines.append("DISCARD ALL;")
+        lines.append('SET SESSION AUTHORIZATION "%s";' % username)
+        lines.append("SET client_min_messages = WARNING;")
+        lines.append("\\set ON_ERROR_STOP %s" % ("off" if ".error." in file_relative else "on"))
+        lines.append("\\warn %s %d" % (PSQL__marker_begin, first_idx + offset))
+        lines.append("\\i /slurp-in/%s" % file_relative)
+        lines.append("\\warn %s %d" % (PSQL__marker_end, first_idx + offset))
+    return "\n".join(lines)
+
+
+def psql__parse_markers(stderr_all):
+    outcomes = {}
+    current = None
+    captured = []
+    for line in stderr_all.replace("\r\n", "\n").split("\n"):
+        if line.startswith(PSQL__marker_begin + " ") or line.startswith(PSQL__marker_end + " "):
+            marker, idx = line.split(" ")[0], int(line.split(" ")[1])
+            if current is not None:
+                outcomes[current] = [True, "\n".join(captured).strip()]  # psql died inside that file
+            if marker == PSQL__marker_end:
+                text = "\n".join(captured).strip()
+                outcomes[idx] = [text != "", text]
+                current = None
+            else:
+                current = idx
+            captured = []
+        elif current is not None:
+            captured.append(line)
+    if current is not None:
+        outcomes[current] = [True, "\n".join(captured).strip()]
+    return outcomes
+
+
 def execute_files_with_psql(state: State, files, url):
     container_name = "jaaql_pg" if "6060" in url else "jaaql_container"
     docker_exec = ["docker", "exec", "-i"]
     if not platform.system().lower() == 'windows':
         docker_exec = ["sudo"] + docker_exec
 
-    lines = ["set +e", "err=$(mktemp)"]
+    groups = []
     for idx, (username, database, file_relative) in enumerate(files):
-        expect_error = 1 if ".error." in file_relative else 0
-        lines.append("psql -U postgres -d %s -c %s -c 'SET client_min_messages = WARNING;' -f %s >/dev/null 2>\"$err\"; rc=$?" % (
-            psql__shell_quote(database),
-            psql__shell_quote('SET SESSION AUTHORIZATION "%s";' % username),
-            psql__shell_quote("/slurp-in/" + file_relative)))
-        lines.append("had=0; if [ $rc -ne 0 ] || [ -s \"$err\" ]; then had=1; fi")
-        lines.append("printf '@@RESULT %d %%d\\n' \"$had\"; cat \"$err\"; printf '\\n@@END %d\\n'" % (idx, idx))
-        lines.append("if [ $had -eq 1 ] && [ %d -eq 0 ]; then exit 1; fi" % expect_error)
+        if not groups or groups[-1][0] != database:
+            groups.append((database, idx, []))
+        groups[-1][2].append((username, database, file_relative))
+
+    lines = ["set +e"]
+    for database, first_idx, group_files in groups:
+        delimiter = "@@PSQL_SCRIPT_%d" % first_idx
+        lines.append("psql -U postgres -d %s >/dev/null <<'%s'" % (psql__shell_quote(database), delimiter))
+        lines.append(psql__session_script(group_files, first_idx))
+        lines.append(delimiter)
+        lines.append("if [ $? -ne 0 ]; then exit 1; fi")
     lines.append("exit 0")
     script = "\n".join(lines) + "\n"
 
@@ -1028,27 +1077,14 @@ def execute_files_with_psql(state: State, files, url):
         print_error(state, f"Error executing command slurp in command: {e}")
         return
 
-    outcomes = {}
-    current = None
-    captured = []
-    stdout = result.stdout.decode("utf-8", errors="replace")
     stderr_all = result.stderr.decode("utf-8", errors="replace")
-    for line in stdout.replace("\r\n", "\n").split("\n"):
-        if line.startswith("@@RESULT "):
-            _, idx, had = line.split(" ")
-            current = int(idx)
-            outcomes[current] = [had == "1", ""]
-            captured = []
-        elif line.startswith("@@END "):
-            if current is not None:
-                outcomes[current][1] = "\n".join(captured)
-            current = None
-        elif current is not None:
-            captured.append(line)
+    outcomes = psql__parse_markers(stderr_all)
+    unattributed = "\n".join(line for line in stderr_all.replace("\r\n", "\n").split("\n")
+                             if not line.startswith(PSQL__marker_begin + " ") and not line.startswith(PSQL__marker_end + " "))
 
     for idx, (username, database, file_relative) in enumerate(files):
         if idx not in outcomes:
-            print_error(state, f"Error executing: {file_relative}\n\n{stderr_all}")
+            print_error(state, f"Error executing: {file_relative}\n\n{unattributed}")
             return
         had_error, stderr = outcomes[idx]
         expect_error = ".error." in file_relative
