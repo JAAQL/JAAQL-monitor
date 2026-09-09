@@ -49,7 +49,7 @@ ENDPOINT__deep_health = "/internal/deep-health"
 WAIT__restart_begin_seconds = 20    # grace for the deterministic restart to start; if it never does, proceed
 WAIT__healthy_seconds = 180         # max total wait for the workers to be serving queries again
 WAIT__healthy_stable_checks = 3     # consecutive successful probe queries that confirm real health
-WAIT__healthy_poll_interval = 0.5   # seconds between probes
+WAIT__healthy_poll_interval = 0.1   # seconds between probes; the localhost nginx block carries no limit_req
 
 COMMAND__initialiser = "\\"
 COMMAND__reset_short = "\\r"
