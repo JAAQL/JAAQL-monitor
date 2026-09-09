@@ -40,12 +40,13 @@ ENDPOINT__defrost = "/internal/defrost"
 ENDPOINT__is_alive = "/internal/is-alive"
 ENDPOINT__deep_health = "/internal/deep-health"
 
-# \wipe dbms reinstalls JAAQL and restarts every gunicorn/gevent worker (killing in-flight requests).
-# The restart is triggered by the first *real* request after the reinstall, so the next build request
-# lands on a worker being torn down and dies with an unreadable 1099. We therefore probe with a real
-# query (SELECT 1) - is-alive is answered in ~1ms straight through the restart, so it is NOT a valid
-# health signal for the worker bounce. The probe query itself absorbs the one post-install restart;
-# once it succeeds repeatedly, the workers are back and the build can continue safely.
+# \wipe dbms reinstalls JAAQL and then DETERMINISTICALLY restarts the server ~1s after /internal/clean
+# returns (JAAQL model.clean sends SIGQUIT to the gunicorn master), so every worker is replaced with a
+# fresh pool. We must not send the next build request until that bounce is fully done, or it lands on a
+# worker being torn down (504 / lost connection). Probe with a real query (SELECT 1) - is-alive answers
+# in ~1ms straight through the restart, so it is not a valid signal. Wait for the server to go DOWN
+# (restart begun) then come back UP for several consecutive checks.
+WAIT__restart_begin_seconds = 20    # grace for the deterministic restart to start; if it never does, proceed
 WAIT__healthy_seconds = 180         # max total wait for the workers to be serving queries again
 WAIT__healthy_stable_checks = 3     # consecutive successful probe queries that confirm real health
 WAIT__healthy_poll_interval = 0.5   # seconds between probes
@@ -539,22 +540,16 @@ def freeze_defrost_instance(state: State, freeze: bool):
 
 
 def wait_for_server_restart(state: State):
-    # \wipe dbms restarts every gevent worker; the restart is tripped by the first real request after
-    # the reinstall, so the build's next request would land on a worker being torn down and die with an
-    # unreadable 1099. Wait until the server can genuinely serve a query again before continuing.
-    #
-    # Probe with a real trivial query (SELECT 1) through /submit - not is-alive, not deep-health:
-    #   - is-alive answers 200 in ~1ms straight through the bounce (only pings the DB) - it never sees
-    #     the restart, so it is not a valid readiness signal.
-    #   - deep-health needs the compiled query cache (__health__), which the microcompiler only writes
-    #     LATER in the build - it is absent at create_application_database time, so it never goes green.
-    # SELECT 1 exercises the same worker + pooled-connection path the real request will, needs no query
-    # cache, and works with no `database` (like the build's own paramless submits). The probe itself
-    # absorbs the single post-install restart. Require several consecutive successes so a brief green
-    # flap mid-restart is not mistaken for readiness.
+    # \wipe dbms reinstalls JAAQL and then deterministically restarts the server ~1s after this /clean
+    # returns. Wait for that bounce to fully complete before the next build request, or it lands on a
+    # worker being torn down (504 / lost connection). Probe with a real trivial query (SELECT 1) through
+    # /submit - not is-alive (answers 200 in ~1ms straight through the bounce) and not deep-health (needs
+    # the compiled query cache, absent this early in the build). SELECT 1 exercises the same worker +
+    # pooled-connection path the real request will and needs no cache. Wait for the server to go DOWN
+    # (restart begun) then serve again for several consecutive checks.
     conn = state.get_current_connection()
     url = conn.get_http_url() + ENDPOINT__submit
-    state.log("Waiting for JAAQL to be able to serve queries again after wipe...")
+    state.log("Waiting for JAAQL to restart after wipe...")
 
     def can_serve():
         try:
@@ -563,9 +558,23 @@ def wait_for_server_restart(state: State):
         except requests.exceptions.RequestException:
             return False
 
-    deadline = time.time() + WAIT__healthy_seconds
+    # Phase 1: wait for the deterministic restart to BEGIN (server stops serving). If it never does within
+    # the grace window, no restart happened this run, so there is nothing to wait for.
+    began = time.time()
+    went_down = False
+    while time.time() - began < WAIT__restart_begin_seconds:
+        if not can_serve():
+            went_down = True
+            break
+        time.sleep(WAIT__healthy_poll_interval)
+    if not went_down:
+        return
+
+    # Phase 2: wait for the restart to COMPLETE - serving again for several consecutive checks, so a brief
+    # green flap mid-restart is not mistaken for readiness.
+    began = time.time()
     consecutive = 0
-    while time.time() < deadline:
+    while time.time() - began < WAIT__healthy_seconds:
         if can_serve():
             consecutive += 1
             if consecutive >= WAIT__healthy_stable_checks:
@@ -575,7 +584,7 @@ def wait_for_server_restart(state: State):
             consecutive = 0
         time.sleep(WAIT__healthy_poll_interval)
 
-    print_error(state, "JAAQL did not become able to serve queries within %d seconds after the wipe" % WAIT__healthy_seconds)
+    print_error(state, "JAAQL did not come back after the wipe within %d seconds" % WAIT__healthy_seconds)
 
 
 def wipe_jaaql_box(state: State):
