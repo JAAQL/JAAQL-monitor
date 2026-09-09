@@ -640,8 +640,8 @@ def register_jaaql_account(state, credentials_name: str, connection_info: Connec
                     (credentials_name, connection_info.username, res.status_code, res.text))
 
 
-def federate_jaaql_user_account(state, credentials_name: str, connection_info: ConnectionInfo, provider: str, tenant: str, sub: str, username: str):
-    send_json = {
+def build_federated_account(state, connection_info: ConnectionInfo, provider: str, tenant: str, sub: str, username: str):
+    return {
         "username": username,
         "password": None if state.clone_as_attach else connection_info.password,
         "provider": provider,
@@ -649,12 +649,28 @@ def federate_jaaql_user_account(state, credentials_name: str, connection_info: C
         "sub": sub,
         "attach_as": username
     }
-    endpoint = ENDPOINT__attach_batch
-    res = state.request_handler(METHOD__post, endpoint, send_json={"accounts": [send_json]}, handle_error=False)
 
-    if res.status_code != 200:
-        print_error(state, "Error registering jaaql account '%s' with username '%s', received status code %d and message:\n\n\t%s" %
-                    (credentials_name, username, res.status_code, res.text))
+
+def federate_jaaql_user_accounts(state, accounts: list):
+    # accounts are (credentials name, username, file line, send json). The endpoint federates the whole list in one
+    # request, but an error from it names no account, so on failure the accounts are re-run one at a time to fail on
+    # - and name - the offending one exactly as a request per account did
+    res = state.request_handler(METHOD__post, ENDPOINT__attach_batch, send_json={"accounts": [account[3] for account in accounts]},
+                                handle_error=False)
+
+    if res.status_code == 200:
+        return
+
+    for credentials_name, username, file_line, send_json in accounts:
+        state.cur_file_line = file_line
+        single = res if len(accounts) == 1 else state.request_handler(METHOD__post, ENDPOINT__attach_batch,
+                                                                     send_json={"accounts": [send_json]}, handle_error=False)
+        if single.status_code != 200:
+            print_error(state, "Error registering jaaql account '%s' with username '%s', received status code %d and message:\n\n\t%s" %
+                        (credentials_name, username, single.status_code, single.text))
+
+    print_error(state, "Error registering %d jaaql accounts in one request, received status code %d and message:\n\n\t%s" %
+                (len(accounts), res.status_code, res.text))
 
 
 def _render_rows_for_assertion_error(json_output, max_rows: int = 25) -> str:
@@ -1263,14 +1279,38 @@ def deal_with_input(state: State, file_content: str = None):
                     state.is_transactional = False
 
                 state.database_override = candidate_database.split(CONNECT_FOR_CREATEDB)[0].split(CONNECT_FOR_EXTENSION_CONFIGURATION)[0]
-            elif fetched_line.startswith(COMMAND__clone_jaaql_account):
-                candidate_connection_name = fetched_line.split(COMMAND__clone_jaaql_account)[1].split(" ")[0]
-                connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
-                federation_data = json.loads(" ".join(fetched_line.split(COMMAND__clone_jaaql_account)[1].split(" ")[1:]))
+            elif fetched_line.startswith(COMMAND__clone_jaaql_account) or fetched_line.startswith(COMMAND__federate_jaaql_account_with):
+                accounts = []
+                while True:
+                    if fetched_line.startswith(COMMAND__federate_jaaql_account_with):
+                        command = COMMAND__federate_jaaql_account_with
+                    else:
+                        command = COMMAND__clone_jaaql_account
+                    candidate_connection_name = fetched_line.split(command)[1].split(" ")[0]
+                    connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
+                    federation_data = json.loads(" ".join(fetched_line.split(command)[1].split(" ")[1:]))
 
-                connection_info = get_connection_info(state, connection_name=connection_name)
-                federate_jaaql_user_account(state, connection_name, connection_info, federation_data["provider"], federation_data["tenant"],
-                                            federation_data["sub"], federation_data["username"])
+                    if command == COMMAND__federate_jaaql_account_with:
+                        connection_info = get_connection_info(state, connection_name=connection_name,
+                                                             override_username=federation_data["username"])
+                        username = connection_info.username
+                    else:
+                        connection_info = get_connection_info(state, connection_name=connection_name)
+                        username = federation_data["username"]
+
+                    accounts.append((connection_name, username, state.cur_file_line,
+                                     build_federated_account(state, connection_info, federation_data["provider"],
+                                                             federation_data["tenant"], federation_data["sub"], username)))
+
+                    if len(state.file_lines) == 0 or isinstance(state.file_lines[0], EOFMarker):
+                        break
+                    if not (state.file_lines[0].startswith(COMMAND__clone_jaaql_account) or
+                            state.file_lines[0].startswith(COMMAND__federate_jaaql_account_with)):
+                        break
+                    fetched_line = state.file_lines[0].strip()
+                    state.cur_file_line += 1
+                    state.file_lines = state.file_lines[1:]
+                federate_jaaql_user_accounts(state, accounts)
             elif fetched_line.startswith(COMMAND__register_jaaql_account_with):
                 candidate_connection_name = fetched_line.split(COMMAND__register_jaaql_account_with)[1].split(" ")[0]
                 overriding = fetched_line.split(" overriding username as ")
@@ -1281,13 +1321,6 @@ def deal_with_input(state: State, file_content: str = None):
                 connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
 
                 register_jaaql_account(state, connection_name, get_connection_info(state, connection_name=connection_name, override_username=overriding))
-            elif fetched_line.startswith(COMMAND__federate_jaaql_account_with):
-                candidate_connection_name = fetched_line.split(COMMAND__federate_jaaql_account_with)[1].split(" ")[0]
-                connection_name = parse_user_printing_any_errors(state, candidate_connection_name)
-                federation_data = json.loads(" ".join(fetched_line.split(COMMAND__federate_jaaql_account_with)[1].split(" ")[1:]))
-                connection_info = get_connection_info(state, connection_name=connection_name, override_username=federation_data["username"])
-                federate_jaaql_user_account(state, connection_name, connection_info, federation_data["provider"], federation_data["tenant"],
-                                            federation_data["sub"], connection_info.username)
             elif fetched_line.startswith(COMMAND__attach_email_account):
                 candidate_connection_name = fetched_line.split(COMMAND__attach_email_account)[1]
                 connection_name = parse_user_printing_any_errors(state, candidate_connection_name, allow_spaces=True)
