@@ -217,7 +217,7 @@ class State:
         if self.is_verbose:
             print(str(msg))
 
-    def _fetch_oauth_token_for_current_connection(self):
+    def fetch_oauth_token_for_current_connection(self, handle_error: bool = True):
         conn = self.get_current_connection()
 
         if self.skip_auth:
@@ -225,21 +225,26 @@ class State:
                 HEADER__security_bypass: os.environ.get("JAAQL__SUPER_BYPASS_KEY", "00000-00000"),
                 HEADER__security_specify_user: conn.username
             }
-        else:
-            try:
-                oauth_res = requests.post(conn.get_http_url() + ENDPOINT__oauth, json={
-                    "username": conn.username,
-                    "password": conn.password
-                })
+            return True
 
-                if oauth_res.status_code != 200:
+        try:
+            oauth_res = requests.post(conn.get_http_url() + ENDPOINT__oauth, json={
+                "username": conn.username,
+                "password": conn.password
+            })
+
+            if oauth_res.status_code != 200:
+                if handle_error:
                     print_error(self, "Invalid credentials: response code " + str(oauth_res.status_code) + " content: " + oauth_res.text +
                                 " for username '" + conn.username + "'")
-                    return None
+                return False
 
-                conn.oauth_token = {HEADER__security: oauth_res.json()}
-            except requests.exceptions.RequestException:
+            conn.oauth_token = {HEADER__security: oauth_res.json()}
+            return True
+        except requests.exceptions.RequestException:
+            if handle_error:
                 print_error(self, "Could not connect to JAAQL running on " + conn.host + "\nPlease make sure that JAAQL is running and accessible")
+            return False
 
     @staticmethod
     def time_delta_ms(start_time: datetime, end_time: datetime) -> int:
@@ -254,14 +259,14 @@ class State:
             elif conn.password.startswith(MARKER__jaaql_bypass):
                 conn.oauth_token = {HEADER__security_bypass_jaaql: conn.password.split(MARKER__jaaql_bypass)[1]}
             else:
-                self._fetch_oauth_token_for_current_connection()
+                self.fetch_oauth_token_for_current_connection()
 
         start_time = datetime.now()
         res = requests.request(method, conn.get_http_url() + endpoint, json=send_json, headers=conn.oauth_token)
 
         if res.status_code == 401:
             self.log("Refreshing oauth token")
-            self._fetch_oauth_token_for_current_connection()
+            self.fetch_oauth_token_for_current_connection()
             start_time = datetime.now()
             res = requests.request(method, conn.get_http_url() + endpoint, json=send_json, headers=conn.oauth_token)
 
@@ -551,12 +556,23 @@ def wait_for_server_restart(state: State):
     url = conn.get_http_url() + ENDPOINT__submit
     state.log("Waiting for JAAQL to restart after wipe...")
 
-    def can_serve():
+    def probe():
         try:
             return requests.post(url, json={"query": "SELECT 1", "database": "postgres", "autocommit": True},
-                                 headers=conn.oauth_token, timeout=5).status_code == 200
+                                 headers=conn.oauth_token, timeout=5).status_code
         except requests.exceptions.RequestException:
-            return False
+            return None
+
+    def can_serve():
+        code = probe()
+        # A 401 is not the server going down. The wipe reinstalled JAAQL and recreated the accounts, so the
+        # token this connection verified against beforehand can never verify again: re-authenticate and probe
+        # once more rather than reading the rejection as downtime, or every probe from here on fails and the
+        # wait either mistakes the rejection for the restart or times out against a healthy server. Under
+        # --skip-auth there is nothing to refresh; the bypass header is derived, not fetched.
+        if code == 401 and not state.skip_auth and state.fetch_oauth_token_for_current_connection(handle_error=False):
+            code = probe()
+        return code == 200
 
     # Phase 1: wait for the deterministic restart to BEGIN (server stops serving). If it never does within
     # the grace window, no restart happened this run, so there is nothing to wait for.
