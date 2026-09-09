@@ -998,14 +998,15 @@ def psql__shell_quote(value):
 
 PSQL__marker_begin = "@@B"
 PSQL__marker_end = "@@E"
+PSQL__parallel_sessions = 4
 
 
-def psql__session_script(files, first_idx):
+def psql__session_script(indexed_files):
     # DISCARD ALL between the files gives each one the clean session a separate psql process gave it;
     # ON_ERROR_STOP is only on for the files that are not expected to fail, so the session stops where
     # the loop of separate processes stopped
     lines = []
-    for offset, (username, database, file_relative) in enumerate(files):
+    for idx, (username, database, file_relative) in indexed_files:
         lines.append("\\set ON_ERROR_STOP off")
         lines.append("SET client_min_messages = ERROR;")
         lines.append("ROLLBACK;")
@@ -1013,10 +1014,38 @@ def psql__session_script(files, first_idx):
         lines.append('SET SESSION AUTHORIZATION "%s";' % username)
         lines.append("SET client_min_messages = WARNING;")
         lines.append("\\set ON_ERROR_STOP %s" % ("off" if ".error." in file_relative else "on"))
-        lines.append("\\warn %s %d" % (PSQL__marker_begin, first_idx + offset))
+        lines.append("\\warn %s %d" % (PSQL__marker_begin, idx))
         lines.append("\\i /slurp-in/%s" % file_relative)
-        lines.append("\\warn %s %d" % (PSQL__marker_end, first_idx + offset))
+        lines.append("\\warn %s %d" % (PSQL__marker_end, idx))
     return "\n".join(lines)
+
+
+def psql__is_self_contained(file_relative):
+    return ".test." in file_relative or ".error." in file_relative
+
+
+def psql__split_parallel(indexed_files):
+    # a trailing run of test and error files is self contained, each its own BEGIN .. ROLLBACK, so their
+    # order among themselves does not matter; everything before them keeps its order in one session
+    split = len(indexed_files)
+    while split > 0 and psql__is_self_contained(indexed_files[split - 1][1][2]):
+        split -= 1
+    if len(indexed_files) - split <= PSQL__parallel_sessions:
+        return indexed_files, []
+    return indexed_files[:split], indexed_files[split:]
+
+
+def psql__chunks(indexed_files, count):
+    # contiguous chunks, so the tests of one procedure stay in one session and cannot contend with each other
+    size, extra = divmod(len(indexed_files), count)
+    chunks = []
+    at = 0
+    for n in range(count):
+        take = size + (1 if n < extra else 0)
+        if take:
+            chunks.append(indexed_files[at:at + take])
+        at += take
+    return chunks
 
 
 def psql__parse_markers(stderr_all):
@@ -1056,11 +1085,32 @@ def execute_files_with_psql(state: State, files, url):
 
     lines = ["set +e"]
     for database, first_idx, group_files in groups:
-        delimiter = "@@PSQL_SCRIPT_%d" % first_idx
-        lines.append("psql -U postgres -d %s >/dev/null <<'%s'" % (psql__shell_quote(database), delimiter))
-        lines.append(psql__session_script(group_files, first_idx))
-        lines.append(delimiter)
-        lines.append("if [ $? -ne 0 ]; then exit 1; fi")
+        quoted_database = psql__shell_quote(database)
+        ordered, independent = psql__split_parallel([(first_idx + offset, entry) for offset, entry in enumerate(group_files)])
+        if ordered:
+            delimiter = "@@PSQL_SCRIPT_%d" % ordered[0][0]
+            lines.append("psql -U postgres -d %s >/dev/null <<'%s'" % (quoted_database, delimiter))
+            lines.append(psql__session_script(ordered))
+            lines.append(delimiter)
+            lines.append("if [ $? -ne 0 ]; then exit 1; fi")
+        if independent:
+            chunks = psql__chunks(independent, PSQL__parallel_sessions)
+            lines.append("PSQL_TMP=$(mktemp -d)")
+            for n, chunk in enumerate(chunks):
+                delimiter = "@@PSQL_WORKER_%d_%d" % (first_idx, n)
+                lines.append("cat >$PSQL_TMP/s%d <<'%s'" % (n, delimiter))
+                lines.append(psql__session_script(chunk))
+                lines.append(delimiter)
+            for n in range(len(chunks)):
+                # each session writes to its own stderr file, so one session's markers cannot interleave with another's
+                lines.append("psql -U postgres -d %s -f $PSQL_TMP/s%d >/dev/null 2>$PSQL_TMP/e%d &" % (quoted_database, n, n))
+                lines.append("PSQL_PID%d=$!" % n)
+            lines.append("PSQL_RC=0")
+            for n in range(len(chunks)):
+                lines.append("wait $PSQL_PID%d; if [ $? -ne 0 ]; then PSQL_RC=1; fi" % n)
+            lines.append("cat %s >&2" % " ".join("$PSQL_TMP/e%d" % n for n in range(len(chunks))))
+            lines.append("rm -rf $PSQL_TMP")
+            lines.append("if [ $PSQL_RC -ne 0 ]; then exit 1; fi")
     lines.append("exit 0")
     script = "\n".join(lines) + "\n"
 
