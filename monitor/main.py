@@ -1080,6 +1080,78 @@ def psql__chunks(indexed_files, count):
     return chunks
 
 
+PSQL__concurrency_aborts = ["ERROR:  deadlock detected", "ERROR:  could not serialize access"]
+
+
+def psql__aborted_by_concurrency(outcome):
+    return outcome[0] and any(abort in outcome[1] for abort in PSQL__concurrency_aborts)
+
+
+def psql__error_line(stderr, file_relative):
+    prefix = "psql:/slurp-in/%s:" % file_relative
+    for line in stderr.split("\n"):
+        if line.startswith(prefix) and line[len(prefix):].split(":")[0].isdigit():
+            return int(line[len(prefix):].split(":")[0])
+    return 0
+
+
+def psql__script(indexed_files, parallel):
+    groups = []
+    for idx, entry in indexed_files:
+        if not groups or groups[-1][0] != entry[1]:
+            groups.append((entry[1], []))
+        groups[-1][1].append((idx, entry))
+
+    lines = ["set +e"]
+    parallel_files = []
+    for database, group_files in groups:
+        quoted_database = psql__shell_quote(database)
+        ordered, independent = psql__split_parallel(group_files) if parallel else (group_files, [])
+        if ordered:
+            delimiter = "@@PSQL_SCRIPT_%d" % ordered[0][0]
+            lines.append("psql -U postgres -d %s >/dev/null <<'%s'" % (quoted_database, delimiter))
+            lines.append(psql__session_script(ordered))
+            lines.append(delimiter)
+            lines.append("if [ $? -ne 0 ]; then exit 1; fi")
+        if independent:
+            chunks = psql__chunks(independent, PSQL__parallel_sessions)
+            lines.append("PSQL_TMP=$(mktemp -d)")
+            for n, chunk in enumerate(chunks):
+                delimiter = "@@PSQL_WORKER_%d_%d" % (group_files[0][0], n)
+                lines.append("cat >$PSQL_TMP/s%d <<'%s'" % (n, delimiter))
+                lines.append(psql__session_script(chunk))
+                lines.append(delimiter)
+            for n in range(len(chunks)):
+                # each session writes to its own stderr file, so one session's markers cannot interleave with another's
+                lines.append("psql -U postgres -d %s -f $PSQL_TMP/s%d >/dev/null 2>$PSQL_TMP/e%d &" % (quoted_database, n, n))
+                lines.append("PSQL_PID%d=$!" % n)
+            lines.append("PSQL_RC=0")
+            for n in range(len(chunks)):
+                lines.append("wait $PSQL_PID%d; if [ $? -ne 0 ]; then PSQL_RC=1; fi" % n)
+            lines.append("cat %s >&2" % " ".join("$PSQL_TMP/e%d" % n for n in range(len(chunks))))
+            lines.append("rm -rf $PSQL_TMP")
+            lines.append("if [ $PSQL_RC -ne 0 ]; then exit 1; fi")
+            parallel_files.extend(independent)
+    lines.append("exit 0")
+    return "\n".join(lines) + "\n", parallel_files
+
+
+def psql__run(state: State, command, script):
+    try:
+        result = subprocess.run(
+            command,
+            input=script.encode("utf-8"),
+            shell=False,
+            check=False,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE
+        )
+    except Exception as e:
+        print_error(state, f"Error executing command slurp in command: {e}")
+        return None
+    return result.stderr.decode("utf-8", errors="replace")
+
+
 def psql__parse_markers(stderr_all):
     outcomes = {}
     current = None
@@ -1103,72 +1175,48 @@ def psql__parse_markers(stderr_all):
     return outcomes
 
 
-def execute_files_with_psql(state: State, files, url):
+def execute_files_with_psql(state: State, files, url, name_failing_file: bool = False):
     container_name = "jaaql_pg" if "6060" in url else "jaaql_container"
     docker_exec = ["docker", "exec", "-i"]
     if not platform.system().lower() == 'windows':
         docker_exec = ["sudo"] + docker_exec
+    command = docker_exec + [container_name, "sh", "-s"]
 
-    groups = []
-    for idx, (username, database, file_relative) in enumerate(files):
-        if not groups or groups[-1][0] != database:
-            groups.append((database, idx, []))
-        groups[-1][2].append((username, database, file_relative))
-
-    lines = ["set +e"]
-    for database, first_idx, group_files in groups:
-        quoted_database = psql__shell_quote(database)
-        ordered, independent = psql__split_parallel([(first_idx + offset, entry) for offset, entry in enumerate(group_files)])
-        if ordered:
-            delimiter = "@@PSQL_SCRIPT_%d" % ordered[0][0]
-            lines.append("psql -U postgres -d %s >/dev/null <<'%s'" % (quoted_database, delimiter))
-            lines.append(psql__session_script(ordered))
-            lines.append(delimiter)
-            lines.append("if [ $? -ne 0 ]; then exit 1; fi")
-        if independent:
-            chunks = psql__chunks(independent, PSQL__parallel_sessions)
-            lines.append("PSQL_TMP=$(mktemp -d)")
-            for n, chunk in enumerate(chunks):
-                delimiter = "@@PSQL_WORKER_%d_%d" % (first_idx, n)
-                lines.append("cat >$PSQL_TMP/s%d <<'%s'" % (n, delimiter))
-                lines.append(psql__session_script(chunk))
-                lines.append(delimiter)
-            for n in range(len(chunks)):
-                # each session writes to its own stderr file, so one session's markers cannot interleave with another's
-                lines.append("psql -U postgres -d %s -f $PSQL_TMP/s%d >/dev/null 2>$PSQL_TMP/e%d &" % (quoted_database, n, n))
-                lines.append("PSQL_PID%d=$!" % n)
-            lines.append("PSQL_RC=0")
-            for n in range(len(chunks)):
-                lines.append("wait $PSQL_PID%d; if [ $? -ne 0 ]; then PSQL_RC=1; fi" % n)
-            lines.append("cat %s >&2" % " ".join("$PSQL_TMP/e%d" % n for n in range(len(chunks))))
-            lines.append("rm -rf $PSQL_TMP")
-            lines.append("if [ $PSQL_RC -ne 0 ]; then exit 1; fi")
-    lines.append("exit 0")
-    script = "\n".join(lines) + "\n"
-
-    try:
-        result = subprocess.run(
-            docker_exec + [container_name, "sh", "-s"],
-            input=script.encode("utf-8"),
-            shell=False,
-            check=False,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE
-        )
-    except Exception as e:
-        print_error(state, f"Error executing command slurp in command: {e}")
+    script, parallel_files = psql__script(list(enumerate(files)), True)
+    stderr_all = psql__run(state, command, script)
+    if stderr_all is None:
         return
-
-    stderr_all = result.stderr.decode("utf-8", errors="replace")
     outcomes = psql__parse_markers(stderr_all)
+
+    # the parallel sessions cannot see each other's rows but they still lock them, so two tests touching the
+    # same rows in a different order can deadlock (or fail to serialize) where the sequential run would have
+    # taken them one after the other; that abort is an artefact of running side by side, not a verdict, so
+    # the aborted files and every file their sessions never reached run again in one sequential session
+    if any(idx in outcomes and psql__aborted_by_concurrency(outcomes[idx]) for idx, _ in parallel_files):
+        rerun = [(idx, entry) for idx, entry in parallel_files if idx not in outcomes or psql__aborted_by_concurrency(outcomes[idx])]
+        state.log("Re-running %d test file(s) sequentially after parallel sessions deadlocked" % len(rerun))
+        rerun_stderr = psql__run(state, command, psql__script(rerun, False)[0])
+        if rerun_stderr is None:
+            return
+        for idx, _ in rerun:
+            outcomes.pop(idx, None)
+        outcomes.update(psql__parse_markers(rerun_stderr))
+        stderr_all = stderr_all + "\n" + rerun_stderr
+
     unattributed = "\n".join(line for line in stderr_all.replace("\r\n", "\n").split("\n")
                              if not line.startswith(PSQL__marker_begin + " ") and not line.startswith(PSQL__marker_end + " "))
 
     for idx, (username, database, file_relative) in enumerate(files):
+        had_error, stderr = outcomes.get(idx, [True, unattributed])
+        if name_failing_file:
+            # the files of a --psql-input-file batch are each their own input, so name the one that failed rather
+            # than the last one the batch gathered
+            state.file_name = file_relative
+            state.cur_file_line = psql__error_line(stderr, file_relative)
+
         if idx not in outcomes:
             print_error(state, f"Error executing: {file_relative}\n\n{unattributed}")
             return
-        had_error, stderr = outcomes[idx]
         expect_error = ".error." in file_relative
 
         if expect_error:
@@ -1557,7 +1605,7 @@ def initialise_from_args(args, file_name: str = None, file_content: str = None, 
                         if len(state.future_files) == 0 or state.future_files[0]['type'] != FUTURE_TYPE_psql:
                             break
                         state.file_name = state.get_next()['name']
-                    execute_files_with_psql(state, batch, default_connection.get_http_url())
+                    execute_files_with_psql(state, batch, default_connection.get_http_url(), name_failing_file=True)
 
 
 def initialise(file_name: str, configs: list[[str, str]], encoded_configs: list[[str, str, str, str, str | None]],
