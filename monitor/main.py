@@ -16,6 +16,7 @@ from os.path import dirname
 import shutil
 import json
 import platform
+import re
 import subprocess
 import time
 
@@ -77,6 +78,8 @@ COMMAND__set_web_config = "\\set web config"
 COMMAND__with_parameters = "WITH PARAMETERS {"
 COMMAND__with_user = "WITH USER"
 COMMAND__and_user = " AND USER "
+# one user name and nothing else, so that SQL such as a CTE "WITH users AS (" or "with user_rows as (" stays SQL
+REGEX__with_user = re.compile(COMMAND__with_user + r"\s+(\S+)\s*$", re.IGNORECASE)
 
 CONNECT_FOR_CREATEDB = " for createdb"
 CONNECT_FOR_EXTENSION_CONFIGURATION = " for extension configuration"
@@ -1282,7 +1285,7 @@ def deal_with_input(state: State, file_content: str = None):
         except EOFError:
             break
 
-        if fetched_line.startswith(COMMAND__initialiser) or fetched_line.upper().startswith(COMMAND__with_parameters) or fetched_line.upper().startswith(COMMAND__with_user):
+        if fetched_line.startswith(COMMAND__initialiser) or fetched_line.upper().startswith(COMMAND__with_parameters) or REGEX__with_user.match(fetched_line):
             fetched_line = fetched_line.strip()  # Ignore the line terminator e.g. \r\n
             if fetched_line == COMMAND__go or fetched_line == COMMAND__go_short:
                 on_go(state)
@@ -1322,12 +1325,12 @@ def deal_with_input(state: State, file_content: str = None):
                 wipe_jaaql_box(state)
             elif fetched_line == COMMAND__set_web_config:
                 set_web_config(state)
-            elif fetched_line.upper().startswith(COMMAND__with_user):
-                overriding_user = fetched_line.upper().split(COMMAND__with_user)[1].strip().lower()
+            elif with_user := REGEX__with_user.match(fetched_line):
+                overriding_user = with_user.group(1).lower()
                 if "\"" in overriding_user or "'" in overriding_user:
                     print_error(state, "Please do not quote the user!")
                 state.get_current_connection().username = overriding_user
-            elif fetched_line.startswith(COMMAND__with_parameters):
+            elif fetched_line.upper().startswith(COMMAND__with_parameters):
                 if fetched_line.strip().endswith("}"):
                     state.query_parameters = fetched_line[len(COMMAND__with_parameters)-1:]
                 else:
@@ -1339,7 +1342,7 @@ def deal_with_input(state: State, file_content: str = None):
                 state.set_current_connection(get_connection_info(state, connection_name=connection_name), connection_name)
             elif fetched_line.startswith(COMMAND__connect_to_database):
                 candidate_database = fetched_line.split(COMMAND__connect_to_database)[1].split(" ")[0]
-                if fetched_line.endswith(CONNECT_FOR_CREATEDB) or fetched_line.startswith(CONNECT_FOR_EXTENSION_CONFIGURATION):
+                if fetched_line.endswith(CONNECT_FOR_CREATEDB) or fetched_line.endswith(CONNECT_FOR_EXTENSION_CONFIGURATION):
                     state.is_transactional = False
 
                 state.database_override = candidate_database.split(CONNECT_FOR_CREATEDB)[0].split(CONNECT_FOR_EXTENSION_CONFIGURATION)[0]
