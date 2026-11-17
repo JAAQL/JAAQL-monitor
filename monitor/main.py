@@ -623,14 +623,18 @@ def set_web_config(state: State):
 
 
 def attach_email_account(state, application: str, dispatcher_name: str, credentials_name: str, connection_info: ConnectionInfo):
-    res = state.request_handler(METHOD__post, ENDPOINT__dispatchers, send_json={
+    body = {
         "application": application,
         "name": dispatcher_name,
         "url": connection_info.get_host(),
         "port": connection_info.get_port(),
         "username": connection_info.username,
         "password": connection_info.password
-    }, handle_error=False)
+    }
+    if connection_info.database:  # Line 4 of an email credentials file is the From address
+        body["from_address"] = connection_info.database
+
+    res = state.request_handler(METHOD__post, ENDPOINT__dispatchers, send_json=body, handle_error=False)
 
     if res.status_code != 200:
         print_error(state, "Error attaching email account '%s' to dispatcher '%s', received status code %d and message:\n\n\t%s" %
